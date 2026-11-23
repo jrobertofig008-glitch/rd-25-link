@@ -64,6 +64,8 @@
     <div class="row"><button class="primary" id="enableAudio">Activar sonido y voz</button></div>
     <div class="row"><input class="code" id="roxasCode" maxlength="7" placeholder="CÓDIGO" autocomplete="off"><button class="primary" id="roxasConnect">Conectar</button></div>
     <div class="row"><span id="roxasStatus">Sin conectar.</span></div>
+    <div class="row"><button id="roxasReconnect">Volver a conectar</button></div>
+    <p>Mantén esta página abierta y en primer plano. Si cambias de app, el teléfono pausa la conexión; al volver, se reconecta sola.</p>
     <div class="subtitle" id="subtitle"></div>
     <pre id="roxasLog">Aún no ha llegado nada.</pre>
   </section>
@@ -102,7 +104,7 @@ class MiniMqtt {
       try { this.ws = new WebSocket(this.url, "mqtt"); } catch (e) { clearTimeout(timer); return fail("bloqueado: " + e.message); }
       this.ws.binaryType = "arraybuffer";
       this.ws.onerror = () => fail("error de conexión");
-      this.ws.onclose = () => fail("cerrada");
+      this.ws.onclose = () => { const was = done; fail("cerrada"); this.open = false; if (was && this.onDrop) this.onDrop(); };
       this.ws.onopen = () => {
         const id = "rodiplay-" + rnd(8).toLowerCase();
         let flags = 0x02, extra = [];
@@ -121,7 +123,7 @@ class MiniMqtt {
           this.buf = this.buf.slice(i + len);
           if (type === 0x20) {
             clearTimeout(timer);
-            if (body[1] === 0) { done = true; this.ping = setInterval(() => { try { this.ws.send(new Uint8Array([0xC0, 0])); } catch (e) {} }, 30000); resolve(); }
+            if (body[1] === 0) { done = true; this.open = true; this.ping = setInterval(() => { try { this.ws.send(new Uint8Array([0xC0, 0])); } catch (e) {} }, 30000); resolve(); }
             else fail("servidor rechazó la conexión (código " + body[1] + ")");
           } else if (type === 0x30) {
             const tl = (body[0] << 8) | body[1];
@@ -151,11 +153,12 @@ const ntfyBase = () => ($("ntfyBase").value.trim() || "https://ntfy.sh").replace
 const wsBase = (b) => b.replace(/^http/, "ws");
 
 // Un canal: publish(text) en el tema de salida, y escucha el tema de entrada. Métodos: mqtt | ntfy-ws | ntfy-sse | ntfy-poll
-async function openChannel(kind, opts, onText) {
+async function openChannel(kind, opts, onText, onDrop) {
   if (kind.startsWith("mqtt:")) {
     const s = mqttServer(kind.slice(5));
     const c = new MiniMqtt(s.url, s.user, s.pass, (t, msg) => { if (t === opts.inTopic) onText(msg); });
     await c.connect(8000); c.subscribe(opts.inTopic);
+    c.onDrop = () => onDrop && onDrop();
     return { via: s.name, send: async (t) => { c.publish(opts.outTopic, t); }, close: () => c.close() };
   }
   // ntfy: enviar con HTTPS POST; recibir por WebSocket, SSE o consulta periódica (lo primero que funcione)
@@ -170,6 +173,7 @@ async function openChannel(kind, opts, onText) {
         const ws = new WebSocket(wsBase(base) + "/" + opts.inTopic + "/ws?since=" + since);
         await withTimeout(new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("error")); }), 6000);
         ws.onmessage = (ev) => { try { handle(JSON.parse(ev.data)); } catch (e) {} };
+        ws.onclose = () => onDrop && onDrop();
         return { via: "ntfy.sh (envío HTTPS, recepción WebSocket 443)", send, close: () => ws.close(), how };
       }
       if (how === "sse") {
@@ -278,37 +282,91 @@ $("rerun").addEventListener("click", runTests);
 runTests();
 
 // ================= Papeles =================
-let channel = null;
 const topics = (code) => ({ toPhone: "rdlink-" + code.toLowerCase() + "-a", toRodi: "rdlink-" + code.toLowerCase() + "-b" });
 const kindFromLetter = (l) => l === "N" ? "ntfy" : "mqtt:" + l;
+const hhmmss = () => new Date().toLocaleTimeString("es-MX");
 
+// Enlace que se reconecta solo: si la conexión se cae (p. ej. el teléfono pasó a segundo plano),
+// lo intenta de nuevo cada pocos segundos y, al volver a la página, enseguida.
+class Link {
+  constructor(kind, opts, onText, onStatus) {
+    this.kind = kind; this.opts = opts; this.onText = onText; this.onStatus = onStatus;
+    this.ch = null; this.ok = false; this.stopped = false; this.busy = false; this.hiddenAt = 0;
+    this.onVis = () => {
+      if (document.hidden) { this.hiddenAt = Date.now(); return; }
+      // al volver de segundo plano tras más de 10 s, la conexión pudo morir sin avisar: reconectar
+      if (!this.ok || (this.hiddenAt && Date.now() - this.hiddenAt > 10000)) this.reconnect("al volver a la página");
+      this.hiddenAt = 0;
+    };
+    document.addEventListener("visibilitychange", this.onVis);
+  }
+  async start() { await this.connect(); }
+  async connect() {
+    if (this.busy || this.stopped) return; this.busy = true;
+    if (this.ch) { try { this.ch.close(); } catch (e) {} this.ch = null; }
+    this.ok = false; this.onStatus("conectando");
+    try {
+      const ch = await openChannel(this.kind, this.opts, (t) => this.onText(t), () => { if (this.ch === ch) this.drop(); });
+      this.ch = ch; this.ok = true; this.onStatus("conectado", ch.via);
+      this.busy = false;
+      if (this.onUp) this.onUp();
+    } catch (e) {
+      this.busy = false; this.onStatus("fallo", e.message);
+      if (!this.stopped) setTimeout(() => this.connect(), 3000);
+    }
+  }
+  drop() { this.ok = false; this.onStatus("caida"); if (!this.stopped) setTimeout(() => this.connect(), 2000); }
+  reconnect(why) { this.onStatus("reconectando", why); this.connect(); }
+  async send(text) { if (!this.ok || !this.ch) throw new Error("sin conexión"); await this.ch.send(text); }
+  stop() { this.stopped = true; document.removeEventListener("visibilitychange", this.onVis); if (this.ch) try { this.ch.close(); } catch (e) {} }
+}
+
+// ---------- Rodi ----------
+let rodiLink = null;
 $("roleRodi").addEventListener("click", async () => {
   if (!best) return;
   $("roleRodi").classList.add("on"); $("roleRoxas").classList.remove("on");
   $("rodiBox").classList.remove("hidden"); $("roxasBox").classList.add("hidden");
-  if (channel) channel.close();
-  const code = best.letter + rnd(6);
-  $("rodiCode").textContent = code; $("rodiStatus").textContent = "Conectando…";
-  const t = topics(code), sent = new Map(), log = [];
+  if (rodiLink) rodiLink.stop();
+  const code = best.letter + rnd(6), t = topics(code);
+  $("rodiCode").textContent = code;
+  const log = [], pending = new Map();   // id -> { text, t0, tries, timer }
+  let phoneSeen = 0, via = "";
   const render = () => { $("rodiLog").textContent = log.join("\n"); };
-  try {
-    channel = await openChannel(best.kind, { inTopic: t.toRodi, outTopic: t.toPhone, receive: best.receive }, (msg) => {
-      let m; try { m = JSON.parse(msg); } catch (e) { return; }
-      if (m.t === "hola") { log.unshift("Roxas se conectó a la sala."); render(); }
-      if (m.t === "ack" && sent.has(m.id)) { log.unshift("Roxas lo recibió · ida y vuelta " + Math.round(performance.now() - sent.get(m.id)) + " ms"); render(); }
-    });
-    $("rodiStatus").textContent = "Sala " + code + " abierta por " + channel.via + ". Pásale el código a Roxas y espera a «Roxas se conectó».";
-  } catch (e) { channel = null; $("rodiStatus").textContent = "No se pudo abrir la sala: " + e.message; }
-  $("rodiSend").onclick = async () => {
-    if (!channel) { $("rodiStatus").textContent = "Todavía no hay sala abierta."; return; }
+  const status = (st, info) => {
+    if (st === "conectado") via = info;
+    const phone = phoneSeen ? (Date.now() - phoneSeen < 40000 ? "Roxas EN LÍNEA (último aviso hace " + Math.round((Date.now() - phoneSeen) / 1000) + " s)" : "Roxas SIN SEÑAL desde hace " + Math.round((Date.now() - phoneSeen) / 1000) + " s") : "Roxas todavía no se ha conectado";
+    const mine = st === "conectado" || (st === undefined && rodiLink && rodiLink.ok) ? "Sala " + code + " abierta por " + via : st === "fallo" ? "Sin conexión (" + info + "), reintentando…" : st === "caida" ? "Conexión perdida, reconectando…" : "Conectando…";
+    $("rodiStatus").textContent = mine + " · " + phone + ".";
+  };
+  setInterval(() => status(), 2000);
+  rodiLink = new Link(best.kind, { inTopic: t.toRodi, outTopic: t.toPhone, receive: best.receive }, (msg) => {
+    let m; try { m = JSON.parse(msg); } catch (e) { return; }
+    if (m.t === "hola") { if (!phoneSeen) { log.unshift(hhmmss() + " · Roxas se conectó a la sala."); render(); } phoneSeen = Date.now(); status(); }
+    if (m.t === "ack" && pending.has(m.id)) {
+      const p = pending.get(m.id); clearTimeout(p.timer); pending.delete(m.id); phoneSeen = Date.now();
+      log.unshift(hhmmss() + " · Roxas lo recibió · " + Math.round(performance.now() - p.t0) + " ms" + (p.tries > 1 ? " (al intento " + p.tries + ")" : "")); render();
+    }
+  }, status);
+  await rodiLink.start();
+  const trySend = async (id) => {
+    const p = pending.get(id); if (!p) return;
+    p.tries++;
+    try { await rodiLink.send(JSON.stringify({ t: "narra", id, text: p.text })); if (p.tries > 1) { log.unshift(hhmmss() + " · Reintento " + p.tries + " de «" + p.text.slice(0, 30) + "…»"); render(); } }
+    catch (e) { log.unshift(hhmmss() + " · No se pudo enviar (" + e.message + "), se reintentará."); render(); }
+    if (p.tries < 8) p.timer = setTimeout(() => trySend(id), 4000);
+    else { pending.delete(id); log.unshift(hhmmss() + " · Sin acuse tras 8 intentos: «" + p.text.slice(0, 30) + "…» no llegó."); render(); }
+  };
+  $("rodiSend").onclick = () => {
     const text = $("rodiText").value.trim(); if (!text) return;
-    const id = rnd(6); sent.set(id, performance.now());
-    try { await channel.send(JSON.stringify({ t: "narra", id, text })); log.unshift("Enviado: «" + text + "»"); }
-    catch (e) { log.unshift("No se pudo enviar: " + e.message); }
-    render();
+    const id = rnd(6); pending.set(id, { text, t0: performance.now(), tries: 0 });
+    log.unshift(hhmmss() + " · Enviado: «" + text + "»"); render();
+    trySend(id);
   };
 });
 
+// ---------- Roxas ----------
+let phoneLink = null;
 $("roleRoxas").addEventListener("click", () => {
   $("roleRoxas").classList.add("on"); $("roleRodi").classList.remove("on");
   $("roxasBox").classList.remove("hidden"); $("rodiBox").classList.add("hidden");
@@ -327,24 +385,36 @@ $("enableAudio").addEventListener("click", () => {
 $("roxasConnect").addEventListener("click", async () => {
   const code = $("roxasCode").value.trim().toUpperCase();
   if (code.length !== 7 || !/^[NSHEC]/.test(code)) { $("roxasStatus").textContent = "El código tiene 7 caracteres y empieza por N, S, H o E."; return; }
-  if (channel) channel.close();
-  $("roxasStatus").textContent = "Conectando…";
-  const t = topics(code), log = [];
-  try {
-    channel = await openChannel(kindFromLetter(code[0]), { inTopic: t.toPhone, outTopic: t.toRodi }, (msg) => {
-      let m; try { m = JSON.parse(msg); } catch (e) { return; }
-      if (m.t !== "narra" || typeof m.text !== "string") return;
-      const text = m.text.slice(0, 500);
-      $("subtitle").textContent = text;
-      const spoke = speak(text);
-      log.unshift("Recibido: «" + text + "»" + (spoke ? " · leído en voz alta" : " · sin voz"));
-      $("roxasLog").textContent = log.join("\n");
-      channel.send(JSON.stringify({ t: "ack", id: String(m.id || "").slice(0, 12) })).catch(() => {});
-    });
-    await channel.send(JSON.stringify({ t: "hola" }));
-    $("roxasStatus").textContent = "Conectado a la sala " + code + " por " + channel.via + ". Esperando frases de Rodi…";
-  } catch (e) { channel = null; $("roxasStatus").textContent = "No se pudo conectar: " + e.message; }
+  if (phoneLink) phoneLink.stop();
+  const t = topics(code), log = [], heard = new Set();
+  let lastMsg = 0, lastSt = "conectando", lastInfo = "";
+  const status = (st, info) => {
+    if (st === undefined) { st = lastSt; info = lastInfo; } else { lastSt = st; lastInfo = info; }
+    const txt = st === "conectado" ? "Conectado a la sala " + code + " por " + info + ". Esperando frases de Rodi…"
+      : st === "caida" ? "Conexión perdida. Reconectando sola…"
+      : st === "reconectando" ? "Reconectando (" + info + ")…"
+      : st === "fallo" ? "No se pudo conectar (" + info + "). Reintentando…" : "Conectando…";
+    $("roxasStatus").textContent = txt + (lastMsg ? " · Última frase: " + new Date(lastMsg).toLocaleTimeString("es-MX") : "");
+  };
+  phoneLink = new Link(kindFromLetter(code[0]), { inTopic: t.toPhone, outTopic: t.toRodi }, (msg) => {
+    let m; try { m = JSON.parse(msg); } catch (e) { return; }
+    if (m.t !== "narra" || typeof m.text !== "string") return;     // solo texto: cualquier otra cosa se descarta
+    const id = String(m.id || "").slice(0, 12);
+    phoneLink.send(JSON.stringify({ t: "ack", id })).catch(() => {});
+    if (heard.has(id)) return;                                     // reintento de una frase ya leída
+    heard.add(id); lastMsg = Date.now();
+    const text = m.text.slice(0, 500);
+    $("subtitle").textContent = text;
+    const spoke = speak(text);
+    log.unshift(hhmmss() + " · Recibido: «" + text + "»" + (spoke ? " · leído en voz alta" : " · sin voz"));
+    status();
+    $("roxasLog").textContent = log.join("\n");
+  }, status);
+  phoneLink.onUp = () => phoneLink.send(JSON.stringify({ t: "hola" })).catch(() => {});
+  setInterval(() => { if (phoneLink && phoneLink.ok && !document.hidden) phoneLink.send(JSON.stringify({ t: "hola" })).catch(() => {}); }, 15000);
+  await phoneLink.start();
 });
+$("roxasReconnect").addEventListener("click", () => { if (phoneLink) phoneLink.reconnect("a mano"); });
 </script>
 </body>
 </html>
