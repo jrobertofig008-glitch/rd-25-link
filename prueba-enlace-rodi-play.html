@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Prueba de enlace RODI Play</title>
+<style>
+  :root { --bg:#15131c; --panel:#1f1c29; --line:#34304a; --text:#ece9f5; --muted:#a49fb8; --accent:#8f84ff; --ok:#7ee0a0; --bad:#ff7a8a; --warn:#ffd23f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 14px; display: grid; gap: 14px; }
+  h1 { font-size: 20px; margin: 4px 0 0; }
+  h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  p { margin: 0 0 8px; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  button { font: inherit; font-weight: 700; border-radius: 10px; border: 1px solid #47415f; background: #2d2940; color: var(--text); padding: 11px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #14121c; }
+  button.on { background: #4a3fa8; border-color: var(--accent); }
+  input, textarea { font: inherit; background: #14121c; color: var(--text); border: 1px solid #47415f; border-radius: 10px; padding: 10px 12px; width: 100%; }
+  input.code { width: 9em; text-transform: uppercase; letter-spacing: .15em; font-weight: 700; text-align: center; }
+  pre { white-space: pre-wrap; word-break: break-word; background:#0e0d14; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin:0; font: 13px/1.4 ui-monospace, Menlo, monospace; color:#cfe8c8; }
+  .big { font-size: 22px; font-weight: 800; color: var(--text); }
+  .subtitle { min-height: 2.6em; font-size: 20px; font-weight: 700; color: #fff; background:#0e0d14; border-radius: 10px; padding: 10px 12px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Prueba de enlace · RODI Play</h1>
+  <p>Esta página solo comprueba si es posible conectar la página de Rodi con el teléfono de Roxas. No contiene el juego y no guarda nada.</p>
+
+  <section>
+    <h2>1 · ¿Quién abre esta página?</h2>
+    <div class="row">
+      <button id="roleRodi">Soy Rodi (envío)</button>
+      <button id="roleRoxas">Soy Roxas (teléfono, recibo)</button>
+    </div>
+    <p id="roleHint">Elige un papel. Las pruebas de red empiezan solas al abrir la página.</p>
+  </section>
+
+  <section>
+    <h2>2 · Pruebas de este navegador</h2>
+    <div class="row"><button id="rerun">Repetir pruebas</button></div>
+    <pre id="report">Preparando pruebas…</pre>
+  </section>
+
+  <section id="rodiBox" class="hidden">
+    <h2>3 · Rodi: enviar una frase de prueba</h2>
+    <p>Código de sala (díselo a Roxas):</p>
+    <div class="big" id="rodiCode">------</div>
+    <div class="row"><span id="rodiStatus">Sin conectar.</span></div>
+    <textarea id="rodiText" rows="2">Hola Roxas, soy Rodi. Voy hacia la puerta del laboratorio porque Oak me espera allí.</textarea>
+    <div class="row"><button class="primary" id="rodiSend">Enviar frase</button></div>
+    <pre id="rodiLog">Aún no se ha enviado nada.</pre>
+  </section>
+
+  <section id="roxasBox" class="hidden">
+    <h2>3 · Roxas: recibir y escuchar</h2>
+    <p>1) Pulsa «Activar sonido y voz» (el teléfono lo exige). 2) Escribe el código que te da Rodi y pulsa «Conectar».</p>
+    <div class="row"><button class="primary" id="enableAudio">Activar sonido y voz</button><button id="beep">Probar sonido</button></div>
+    <div class="row"><input class="code" id="roxasCode" maxlength="6" placeholder="CÓDIGO" autocomplete="off"><button class="primary" id="roxasConnect">Conectar</button></div>
+    <div class="row"><span id="roxasStatus">Sin conectar.</span></div>
+    <div class="subtitle" id="subtitle"></div>
+    <pre id="roxasLog">Aún no ha llegado nada.</pre>
+  </section>
+
+  <section>
+    <h2>Avanzado</h2>
+    <p>Servidor de mensajes personalizado (déjalo vacío para usar los públicos):</p>
+    <input id="customBroker" placeholder="wss://servidor:puerto/mqtt" autocomplete="off">
+  </section>
+</main>
+
+<script>
+"use strict";
+// ================= Cliente MQTT 3.1.1 mínimo sobre WebSocket (solo QoS 0) =================
+const enc = new TextEncoder(), dec = new TextDecoder();
+function mqttStr(s) { const b = enc.encode(s); return [b.length >> 8, b.length & 255, ...b]; }
+function mqttPacket(type, body) {
+  const len = []; let n = body.length;
+  do { let d = n % 128; n = Math.floor(n / 128); if (n > 0) d |= 128; len.push(d); } while (n > 0);
+  return new Uint8Array([type, ...len, ...body]);
+}
+class MiniMqtt {
+  constructor(url, onMessage, onClose) {
+    this.url = url; this.onMessage = onMessage; this.onClose = onClose; this.buf = new Uint8Array(0); this.pid = 1;
+  }
+  connect(timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const fail = (why) => { if (!done) { done = true; try { this.ws && this.ws.close(); } catch (e) {} reject(new Error(why)); } };
+      const timer = setTimeout(() => fail("sin respuesta en " + (timeoutMs / 1000) + " s"), timeoutMs);
+      try { this.ws = new WebSocket(this.url, "mqtt"); } catch (e) { clearTimeout(timer); return fail("bloqueado: " + e.message); }
+      this.ws.binaryType = "arraybuffer";
+      this.ws.onerror = () => fail("error de conexión");
+      this.ws.onclose = () => { const wasOpen = done; fail("cerrada"); if (wasOpen && this.onClose) this.onClose(); };
+      this.ws.onopen = () => {
+        const id = "rodiplay-" + Math.random().toString(36).slice(2, 10);
+        this.ws.send(mqttPacket(0x10, [...mqttStr("MQTT"), 4, 0x02, 0, 60, ...mqttStr(id)]));
+      };
+      this.ws.onmessage = (ev) => {
+        const a = new Uint8Array(ev.data), m = new Uint8Array(this.buf.length + a.length); m.set(this.buf); m.set(a, this.buf.length); this.buf = m;
+        for (;;) {
+          if (this.buf.length < 2) break;
+          let mul = 1, len = 0, i = 1, b;
+          do { b = this.buf[i++]; if (b === undefined) return; len += (b & 127) * mul; mul *= 128; } while (b & 128);
+          if (this.buf.length < i + len) break;
+          const type = this.buf[0] & 0xF0, body = this.buf.subarray(i, i + len);
+          this.buf = this.buf.slice(i + len);
+          if (type === 0x20) {
+            clearTimeout(timer);
+            if (body[1] === 0) { done = true; this.ping = setInterval(() => { try { this.ws.send(new Uint8Array([0xC0, 0])); } catch (e) {} }, 30000); resolve(); }
+            else fail("servidor rechazó la conexión (código " + body[1] + ")");
+          } else if (type === 0x30) {
+            const tl = (body[0] << 8) | body[1];
+            const topic = dec.decode(body.subarray(2, 2 + tl));
+            this.onMessage && this.onMessage(topic, dec.decode(body.subarray(2 + tl)));   // QoS 0: sin identificador
+          }
+        }
+      };
+    });
+  }
+  subscribe(topic) { const id = this.pid++; this.ws.send(mqttPacket(0x82, [id >> 8, id & 255, ...mqttStr(topic), 0])); }
+  publish(topic, text) { this.ws.send(mqttPacket(0x30, [...mqttStr(topic), ...enc.encode(text)])); }
+  close() { clearInterval(this.ping); try { this.ws.close(); } catch (e) {} }
+}
+
+// ================= Pruebas de este navegador =================
+const BROKERS = [
+  ["HiveMQ", "wss://broker.hivemq.com:8884/mqtt"],
+  ["EMQX", "wss://broker.emqx.io:8084/mqtt"],
+  ["Mosquitto", "wss://test.mosquitto.org:8081/"],
+];
+const $ = (id) => document.getElementById(id);
+let lines = [];
+let workingBroker = null;
+let runId = 0;   // cada tanda de pruebas escribe solo en su propio informe
+function show() { $("report").textContent = lines.join("\n"); }
+function withTimeout(p, ms) { return Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error("sin respuesta en " + ms / 1000 + " s")), ms))]); }
+function brokerList() {
+  const c = $("customBroker").value.trim();
+  return c ? [["Personalizado", c]] : BROKERS;
+}
+
+async function testBroker(name, url) {
+  const t0 = performance.now();
+  const topic = "rodiplay/prueba/" + Math.random().toString(36).slice(2, 10);
+  let got = null;
+  const c = new MiniMqtt(url, (tp, msg) => { if (tp === topic) got = msg; });
+  try {
+    await c.connect(8000);
+    const tConn = Math.round(performance.now() - t0);
+    c.subscribe(topic);
+    await new Promise(r => setTimeout(r, 300));
+    const t1 = performance.now(); c.publish(topic, "eco");
+    await withTimeout(new Promise((res, rej) => { const iv = setInterval(() => { if (got) { clearInterval(iv); res(); } }, 20); }), 5000);
+    const rt = Math.round(performance.now() - t1);
+    c.close();
+    return { ok: true, text: "FUNCIONA · conexión " + tConn + " ms · ida y vuelta de un mensaje " + rt + " ms" };
+  } catch (e) { c.close(); return { ok: false, text: "NO FUNCIONA (" + e.message + ")" }; }
+}
+
+async function testWebRTC() {
+  if (typeof RTCPeerConnection !== "function") return "NO DISPONIBLE (el navegador no ofrece conexión directa)";
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const types = new Set();
+    pc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) { const m = / typ (\w+)/.exec(e.candidate.candidate); if (m) types.add(m[1]); } };
+    pc.createDataChannel("prueba");
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(r => setTimeout(r, 4000));
+    pc.close();
+    if (types.has("srflx")) return "POSIBLE (candidatos: " + [...types].join(", ") + ")";
+    return types.size ? "DUDOSA (solo candidatos " + [...types].join(", ") + "; probablemente no conecta fuera de esta red)" : "BLOQUEADA (sin candidatos)";
+  } catch (e) { return "BLOQUEADA (" + e.message + ")"; }
+}
+
+function voiceInfo() {
+  if (!("speechSynthesis" in window)) return "NO DISPONIBLE";
+  const v = speechSynthesis.getVoices();
+  const es = v.filter(x => /^es/i.test(x.lang));
+  return v.length ? (es.length ? "DISPONIBLE · " + es.length + " voces en español: " + es.slice(0, 4).map(x => x.name + " (" + x.lang + ")").join(", ") : "SIN VOCES EN ESPAÑOL (" + v.length + " voces en total)") : "cargando voces… (pulsa «Repetir pruebas» en unos segundos)";
+}
+
+async function runTests() {
+  const my = ++runId, L = [];
+  const live = () => my === runId;
+  const out = (l) => { if (!live()) return; L.push(l); lines = L; show(); };
+  const replaceLast = (l) => { if (!live()) return; L[L.length - 1] = l; show(); };
+  workingBroker = null;
+  out("PRUEBA DE ENLACE RODI PLAY · " + new Date().toLocaleString("es-MX"));
+  let inFrame = "no"; try { inFrame = window.self !== window.top ? "sí" : "no"; } catch (e) { inFrame = "sí (otro origen)"; }
+  out("Página: " + location.href);
+  out("Origen: " + location.origin + " · dentro de un marco: " + inFrame + " · contexto seguro: " + (window.isSecureContext ? "sí" : "no"));
+  out("Navegador: " + navigator.userAgent);
+  try { await withTimeout(fetch("https://www.gstatic.com/generate_204", { mode: "no-cors", cache: "no-store" }), 6000); out("Internet desde la página (fetch): FUNCIONA"); }
+  catch (e) { out("Internet desde la página (fetch): NO FUNCIONA (" + e.message + ")"); }
+  for (const [name, url] of brokerList()) {
+    out("Mensajería " + name + " (" + url + "): probando…");
+    const r = await testBroker(name, url);
+    if (!live()) return;
+    replaceLast("Mensajería " + name + " (" + url + "): " + r.text);
+    if (r.ok && !workingBroker) workingBroker = { name, url };
+  }
+  out("Conexión directa entre navegadores (WebRTC): probando…");
+  const w = await testWebRTC();
+  if (!live()) return;
+  replaceLast("Conexión directa entre navegadores (WebRTC): " + w);
+  out("Voz del navegador: " + voiceInfo());
+  out("Sonido (AudioContext): " + ((window.AudioContext || window.webkitAudioContext) ? "DISPONIBLE" : "NO DISPONIBLE"));
+  out("CONCLUSIÓN: " + (workingBroker ? "el enlace es posible usando " + workingBroker.name + "." : "ningún servicio de mensajería funcionó desde este navegador."));
+}
+$("rerun").addEventListener("click", runTests);
+if ("speechSynthesis" in window) speechSynthesis.onvoiceschanged = () => {};
+runTests();
+
+// ================= Papeles =================
+let link = null;
+async function openLink(code, onMsg) {
+  if (link) link.close();
+  const list = workingBroker ? [[workingBroker.name, workingBroker.url]] : brokerList();
+  for (const [name, url] of list) {
+    const c = new MiniMqtt(url, onMsg);
+    try { await c.connect(8000); c.subscribe("rodiplay/sala/" + code); link = c; return name; } catch (e) { c.close(); }
+  }
+  throw new Error("no se pudo conectar con ningún servicio");
+}
+const TOPIC = (code) => "rodiplay/sala/" + code;
+
+$("roleRodi").addEventListener("click", async () => {
+  $("roleRodi").classList.add("on"); $("roleRoxas").classList.remove("on");
+  $("rodiBox").classList.remove("hidden"); $("roxasBox").classList.add("hidden");
+  const code = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[b % 32]).join("");
+  $("rodiCode").textContent = code; $("rodiStatus").textContent = "Conectando…";
+  const sent = new Map(); const log = [];
+  try {
+    const via = await openLink(code, (topic, msg) => {
+      let m; try { m = JSON.parse(msg); } catch (e) { return; }
+      if (m.t === "ack" && sent.has(m.id)) {
+        log.unshift("Roxas lo recibió · ida y vuelta " + Math.round(performance.now() - sent.get(m.id)) + " ms · «" + m.echo + "»");
+        $("rodiLog").textContent = log.join("\n");
+      }
+      if (m.t === "hola") { log.unshift("Roxas se conectó a la sala."); $("rodiLog").textContent = log.join("\n"); }
+    });
+    $("rodiStatus").textContent = "Conectada a la sala " + code + " por " + via + ". Espera a que Roxas se conecte y pulsa «Enviar frase».";
+  } catch (e) { $("rodiStatus").textContent = "No se pudo conectar: " + e.message; }
+  $("rodiSend").onclick = () => {
+    if (!link) { $("rodiStatus").textContent = "Todavía no hay conexión."; return; }
+    const id = Math.random().toString(36).slice(2, 8), text = $("rodiText").value.trim(); if (!text) return;
+    sent.set(id, performance.now());
+    link.publish(TOPIC(code), JSON.stringify({ t: "narra", id, text }));
+    log.unshift("Enviado: «" + text + "»"); $("rodiLog").textContent = log.join("\n");
+  };
+});
+
+let audioCtx = null, voiceReady = false;
+$("roleRoxas").addEventListener("click", () => {
+  $("roleRoxas").classList.add("on"); $("roleRodi").classList.remove("on");
+  $("roxasBox").classList.remove("hidden"); $("rodiBox").classList.add("hidden");
+});
+function speak(text) {
+  if (!("speechSynthesis" in window)) return false;
+  const u = new SpeechSynthesisUtterance(text);
+  const es = speechSynthesis.getVoices().filter(v => /^es/i.test(v.lang));
+  const mx = es.find(v => /es-MX|es-US|es-419/i.test(v.lang));
+  if (mx || es[0]) u.voice = mx || es[0];
+  u.lang = (mx || es[0] || { lang: "es-MX" }).lang;
+  speechSynthesis.speak(u); return true;
+}
+$("enableAudio").addEventListener("click", () => {
+  try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (e) {}
+  voiceReady = speak("Sonido y voz activados.");
+  $("enableAudio").textContent = voiceReady ? "Sonido y voz activados" : "Este navegador no tiene voz";
+});
+$("beep").addEventListener("click", () => {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.frequency.value = 660; g.gain.value = 0.15;
+    o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.25);
+  } catch (e) { $("roxasStatus").textContent = "Sin sonido: " + e.message; }
+});
+$("roxasConnect").addEventListener("click", async () => {
+  const code = $("roxasCode").value.trim().toUpperCase();
+  if (code.length !== 6) { $("roxasStatus").textContent = "El código tiene 6 caracteres."; return; }
+  $("roxasStatus").textContent = "Conectando…";
+  const log = [];
+  try {
+    const via = await openLink(code, (topic, msg) => {
+      let m; try { m = JSON.parse(msg); } catch (e) { return; }
+      if (m.t !== "narra") return;
+      $("subtitle").textContent = m.text;
+      const spoke = speak(m.text);
+      log.unshift("Recibido: «" + m.text + "»" + (spoke ? " · leído en voz alta" : " · sin voz"));
+      $("roxasLog").textContent = log.join("\n");
+      link.publish(TOPIC(code), JSON.stringify({ t: "ack", id: m.id, echo: m.text.slice(0, 40) }));
+    });
+    link.publish(TOPIC(code), JSON.stringify({ t: "hola" }));
+    $("roxasStatus").textContent = "Conectado a la sala " + code + " por " + via + ". Esperando frases de Rodi…";
+  } catch (e) { $("roxasStatus").textContent = "No se pudo conectar: " + e.message; }
+});
+</script>
+</body>
+</html>
