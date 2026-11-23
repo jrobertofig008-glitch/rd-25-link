@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Prueba de enlace 2 · RODI Play</title>
+<style>
+  :root { --bg:#15131c; --panel:#1f1c29; --line:#34304a; --text:#ece9f5; --muted:#a49fb8; --accent:#8f84ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 14px; display: grid; gap: 14px; }
+  h1 { font-size: 20px; margin: 4px 0 0; }
+  h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  p { margin: 0 0 8px; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  button { font: inherit; font-weight: 700; border-radius: 10px; border: 1px solid #47415f; background: #2d2940; color: var(--text); padding: 11px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #14121c; }
+  button.on { background: #4a3fa8; border-color: var(--accent); }
+  button:disabled { opacity: .5; }
+  input, textarea { font: inherit; background: #14121c; color: var(--text); border: 1px solid #47415f; border-radius: 10px; padding: 10px 12px; width: 100%; }
+  input.code { width: 10em; text-transform: uppercase; letter-spacing: .15em; font-weight: 700; text-align: center; }
+  pre { white-space: pre-wrap; word-break: break-word; background:#0e0d14; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin:0; font: 13px/1.4 ui-monospace, Menlo, monospace; color:#cfe8c8; }
+  .big { font-size: 26px; font-weight: 800; letter-spacing: .12em; color: var(--text); }
+  .subtitle { min-height: 2.6em; font-size: 20px; font-weight: 700; color: #fff; background:#0e0d14; border-radius: 10px; padding: 10px 12px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Prueba de enlace 2 · RODI Play</h1>
+  <p>Segunda prueba: además de los servicios anteriores, prueba caminos que solo usan el puerto estándar de las páginas web (443). No contiene el juego y no guarda nada.</p>
+
+  <section>
+    <h2>1 · Pruebas de este navegador</h2>
+    <p>Empiezan solas. Espera a que aparezca la línea «CONCLUSIÓN» (puede tardar hasta 1 minuto).</p>
+    <div class="row"><button id="rerun">Repetir pruebas</button></div>
+    <pre id="report">Preparando pruebas…</pre>
+  </section>
+
+  <section>
+    <h2>2 · ¿Quién abre esta página?</h2>
+    <div class="row">
+      <button id="roleRodi" disabled>Soy Rodi (envío)</button>
+      <button id="roleRoxas">Soy Roxas (teléfono, recibo)</button>
+    </div>
+    <p id="roleHint">«Soy Rodi» se activa cuando terminan las pruebas.</p>
+  </section>
+
+  <section id="rodiBox" class="hidden">
+    <h2>3 · Rodi: enviar una frase</h2>
+    <p>Código de sala (díselo a Roxas tal cual, con la primera letra):</p>
+    <div class="big" id="rodiCode">-------</div>
+    <div class="row"><span id="rodiStatus">Sin conectar.</span></div>
+    <textarea id="rodiText" rows="2">Hola Roxas, soy Rodi. Voy hacia la puerta del laboratorio porque Oak me espera allí.</textarea>
+    <div class="row"><button class="primary" id="rodiSend">Enviar frase</button></div>
+    <pre id="rodiLog">Aún no se ha enviado nada.</pre>
+  </section>
+
+  <section id="roxasBox" class="hidden">
+    <h2>3 · Roxas: recibir y escuchar</h2>
+    <p>1) Pulsa «Activar sonido y voz». 2) Escribe el código de Rodi (7 caracteres) y pulsa «Conectar».</p>
+    <div class="row"><button class="primary" id="enableAudio">Activar sonido y voz</button></div>
+    <div class="row"><input class="code" id="roxasCode" maxlength="7" placeholder="CÓDIGO" autocomplete="off"><button class="primary" id="roxasConnect">Conectar</button></div>
+    <div class="row"><span id="roxasStatus">Sin conectar.</span></div>
+    <div class="subtitle" id="subtitle"></div>
+    <pre id="roxasLog">Aún no ha llegado nada.</pre>
+  </section>
+
+  <section>
+    <h2>Avanzado (solo para pruebas técnicas)</h2>
+    <p>Déjalo vacío para usar los servicios públicos.</p>
+    <input id="ntfyBase" placeholder="Servidor de avisos (por defecto https://ntfy.sh)" autocomplete="off">
+    <div style="height:8px"></div>
+    <input id="customBroker" placeholder="Servidor MQTT personalizado (wss://…)" autocomplete="off">
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function withTimeout(p, ms) { return Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error("sin respuesta en " + ms / 1000 + " s")), ms))]); }
+function rnd(n) { return Array.from(crypto.getRandomValues(new Uint8Array(n)), b => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[b % 32]).join(""); }
+
+// ================= MQTT 3.1.1 mínimo sobre WebSocket (QoS 0, usuario/clave opcional) =================
+const enc = new TextEncoder(), dec = new TextDecoder();
+const mqttStr = (s) => { const b = enc.encode(s); return [b.length >> 8, b.length & 255, ...b]; };
+function mqttPacket(type, body) {
+  const len = []; let n = body.length;
+  do { let d = n % 128; n = Math.floor(n / 128); if (n > 0) d |= 128; len.push(d); } while (n > 0);
+  return new Uint8Array([type, ...len, ...body]);
+}
+class MiniMqtt {
+  constructor(url, user, pass, onMessage) { this.url = url; this.user = user; this.pass = pass; this.onMessage = onMessage; this.buf = new Uint8Array(0); this.pid = 1; }
+  connect(timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const fail = (why) => { if (!done) { done = true; try { this.ws && this.ws.close(); } catch (e) {} reject(new Error(why)); } };
+      const timer = setTimeout(() => fail("sin respuesta en " + timeoutMs / 1000 + " s"), timeoutMs);
+      try { this.ws = new WebSocket(this.url, "mqtt"); } catch (e) { clearTimeout(timer); return fail("bloqueado: " + e.message); }
+      this.ws.binaryType = "arraybuffer";
+      this.ws.onerror = () => fail("error de conexión");
+      this.ws.onclose = () => fail("cerrada");
+      this.ws.onopen = () => {
+        const id = "rodiplay-" + rnd(8).toLowerCase();
+        let flags = 0x02, extra = [];
+        if (this.user) { flags |= 0x80; extra.push(...mqttStr(this.user)); }
+        if (this.pass) { flags |= 0x40; extra.push(...mqttStr(this.pass)); }
+        this.ws.send(mqttPacket(0x10, [...mqttStr("MQTT"), 4, flags, 0, 60, ...mqttStr(id), ...extra]));
+      };
+      this.ws.onmessage = (ev) => {
+        const a = new Uint8Array(ev.data), m = new Uint8Array(this.buf.length + a.length); m.set(this.buf); m.set(a, this.buf.length); this.buf = m;
+        for (;;) {
+          if (this.buf.length < 2) break;
+          let mul = 1, len = 0, i = 1, b;
+          do { b = this.buf[i++]; if (b === undefined) return; len += (b & 127) * mul; mul *= 128; } while (b & 128);
+          if (this.buf.length < i + len) break;
+          const type = this.buf[0] & 0xF0, body = this.buf.subarray(i, i + len);
+          this.buf = this.buf.slice(i + len);
+          if (type === 0x20) {
+            clearTimeout(timer);
+            if (body[1] === 0) { done = true; this.ping = setInterval(() => { try { this.ws.send(new Uint8Array([0xC0, 0])); } catch (e) {} }, 30000); resolve(); }
+            else fail("servidor rechazó la conexión (código " + body[1] + ")");
+          } else if (type === 0x30) {
+            const tl = (body[0] << 8) | body[1];
+            this.onMessage && this.onMessage(dec.decode(body.subarray(2, 2 + tl)), dec.decode(body.subarray(2 + tl)));
+          }
+        }
+      };
+    });
+  }
+  subscribe(topic) { const id = this.pid++; this.ws.send(mqttPacket(0x82, [id >> 8, id & 255, ...mqttStr(topic), 0])); }
+  publish(topic, text) { this.ws.send(mqttPacket(0x30, [...mqttStr(topic), ...enc.encode(text)])); }
+  close() { clearInterval(this.ping); try { this.ws.close(); } catch (e) {} }
+}
+
+// ================= Transportes =================
+const MQTT_SERVERS = {
+  S: { name: "shiftr.io (puerto 443)", url: "wss://public.cloud.shiftr.io", user: "public", pass: "public" },
+  H: { name: "HiveMQ (puerto 8884)", url: "wss://broker.hivemq.com:8884/mqtt" },
+  E: { name: "EMQX (puerto 8084)", url: "wss://broker.emqx.io:8084/mqtt" },
+};
+function mqttServer(letter) {
+  const c = $("customBroker").value.trim();
+  if (c && letter === "C") return { name: "MQTT personalizado", url: c };   // solo para pruebas técnicas
+  return MQTT_SERVERS[letter];
+}
+const ntfyBase = () => ($("ntfyBase").value.trim() || "https://ntfy.sh").replace(/\/+$/, "");
+const wsBase = (b) => b.replace(/^http/, "ws");
+
+// Un canal: publish(text) en el tema de salida, y escucha el tema de entrada. Métodos: mqtt | ntfy-ws | ntfy-sse | ntfy-poll
+async function openChannel(kind, opts, onText) {
+  if (kind.startsWith("mqtt:")) {
+    const s = mqttServer(kind.slice(5));
+    const c = new MiniMqtt(s.url, s.user, s.pass, (t, msg) => { if (t === opts.inTopic) onText(msg); });
+    await c.connect(8000); c.subscribe(opts.inTopic);
+    return { via: s.name, send: async (t) => { c.publish(opts.outTopic, t); }, close: () => c.close() };
+  }
+  // ntfy: enviar con HTTPS POST; recibir por WebSocket, SSE o consulta periódica (lo primero que funcione)
+  const base = ntfyBase();
+  const send = (t) => fetch(base + "/" + opts.outTopic, { method: "POST", body: t }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); });
+  const since = Math.floor(Date.now() / 1000) - 2;
+  const handle = (o) => { if (o && o.event === "message" && typeof o.message === "string") onText(o.message); };
+  const order = opts.receive ? [opts.receive] : ["ws", "sse", "poll"];
+  for (const how of order) {
+    try {
+      if (how === "ws") {
+        const ws = new WebSocket(wsBase(base) + "/" + opts.inTopic + "/ws?since=" + since);
+        await withTimeout(new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("error")); }), 6000);
+        ws.onmessage = (ev) => { try { handle(JSON.parse(ev.data)); } catch (e) {} };
+        return { via: "ntfy.sh (envío HTTPS, recepción WebSocket 443)", send, close: () => ws.close(), how };
+      }
+      if (how === "sse") {
+        const es = new EventSource(base + "/" + opts.inTopic + "/sse?since=" + since);
+        await withTimeout(new Promise((res, rej) => { es.onopen = res; es.onerror = () => rej(new Error("error")); }), 6000);
+        es.onmessage = (ev) => { try { handle(JSON.parse(ev.data)); } catch (e) {} };
+        return { via: "ntfy.sh (envío HTTPS, recepción por eventos)", send, close: () => es.close(), how };
+      }
+      if (how === "poll") {
+        let last = String(since), stop = false;
+        const seen = new Set();
+        const tick = async () => {
+          if (stop) return;
+          try {
+            const r = await fetch(base + "/" + opts.inTopic + "/json?poll=1&since=" + encodeURIComponent(last));
+            for (const line of (await r.text()).split("\n")) {
+              if (!line.trim()) continue; const o = JSON.parse(line);
+              if (o.id && !seen.has(o.id)) { seen.add(o.id); last = o.id; handle(o); }
+            }
+          } catch (e) {}
+          setTimeout(tick, 5000);
+        };
+        await fetch(base + "/" + opts.inTopic + "/json?poll=1&since=" + since).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); });
+        tick();
+        return { via: "ntfy.sh (envío HTTPS, recepción consultando cada 5 s)", send, close: () => { stop = true; }, how };
+      }
+    } catch (e) { /* probar el siguiente método */ }
+  }
+  throw new Error("ntfy no disponible");
+}
+
+// ================= Pruebas =================
+let lines = [], runId = 0, best = null;   // best = { letter, kind, receive }
+function show() { $("report").textContent = lines.join("\n"); }
+
+async function testMqtt(letter) {
+  const s = mqttServer(letter), topic = "rdlink/prueba/" + rnd(10);
+  let got = false;
+  const c = new MiniMqtt(s.url, s.user, s.pass, (t) => { if (t === topic) got = true; });
+  try {
+    const t0 = performance.now(); await c.connect(8000); const tc = Math.round(performance.now() - t0);
+    c.subscribe(topic); await sleep(300);
+    const t1 = performance.now(); c.publish(topic, "eco");
+    await withTimeout(new Promise(res => { const iv = setInterval(() => { if (got) { clearInterval(iv); res(); } }, 20); }), 5000);
+    c.close(); return { ok: true, text: "FUNCIONA · conexión " + tc + " ms · ida y vuelta " + Math.round(performance.now() - t1) + " ms" };
+  } catch (e) { c.close(); return { ok: false, text: "NO FUNCIONA (" + e.message + ")" }; }
+}
+async function testNtfy(how) {
+  const topic = "rdlink-prueba-" + rnd(12).toLowerCase();
+  let got = null, ch = null;
+  try {
+    const t0 = performance.now();
+    ch = await withTimeout(openChannel("ntfy", { inTopic: topic, outTopic: topic, receive: how }, (t) => { got = t; }), 9000);
+    await sleep(how === "poll" ? 300 : 500);
+    await ch.send("eco");
+    await withTimeout(new Promise(res => { const iv = setInterval(() => { if (got) { clearInterval(iv); res(); } }, 50); }), how === "poll" ? 12000 : 6000);
+    ch.close(); return { ok: true, text: "FUNCIONA · ida y vuelta " + Math.round(performance.now() - t0) + " ms" };
+  } catch (e) { if (ch) ch.close(); return { ok: false, text: "NO FUNCIONA (" + e.message + ")" }; }
+}
+async function testWebRTC() {
+  if (typeof RTCPeerConnection !== "function") return "NO DISPONIBLE";
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }); const types = new Set();
+    pc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) { const m = / typ (\w+)/.exec(e.candidate.candidate); if (m) types.add(m[1]); } };
+    pc.createDataChannel("prueba"); await pc.setLocalDescription(await pc.createOffer()); await sleep(4000); pc.close();
+    return types.has("srflx") ? "POSIBLE (" + [...types].join(", ") + ")" : types.size ? "DUDOSA (solo " + [...types].join(", ") + ")" : "BLOQUEADA (sin candidatos)";
+  } catch (e) { return "BLOQUEADA (" + e.message + ")"; }
+}
+
+async function runTests() {
+  const my = ++runId, L = []; best = null; $("roleRodi").disabled = true;
+  const live = () => my === runId;
+  const out = (l) => { if (!live()) return false; L.push(l); lines = L; show(); return true; };
+  const replaceLast = (l) => { if (!live()) return false; L[L.length - 1] = l; show(); return true; };
+  const found = [];
+  out("PRUEBA DE ENLACE 2 RODI PLAY · " + new Date().toLocaleString("es-MX"));
+  out("Página: " + location.href);
+  out("Navegador: " + navigator.userAgent);
+  try { await withTimeout(fetch("https://www.gstatic.com/generate_204", { mode: "no-cors", cache: "no-store" }), 6000); out("A · Internet por HTTPS (fetch): FUNCIONA"); }
+  catch (e) { out("A · Internet por HTTPS (fetch): NO FUNCIONA (" + e.message + ")"); }
+  try { const r = await withTimeout(fetch(ntfyBase() + "/v1/health"), 6000); out("B · Lectura HTTPS de otro sitio (ntfy): " + (r.ok ? "FUNCIONA" : "RESPUESTA " + r.status)); }
+  catch (e) { out("B · Lectura HTTPS de otro sitio (ntfy): NO FUNCIONA (" + e.message + ")"); }
+  for (const [code, label] of [["poll", "C · Avisos ntfy por consulta HTTPS"], ["sse", "D · Avisos ntfy por eventos HTTPS"], ["ws", "E · Avisos ntfy por WebSocket 443"]]) {
+    if (!out(label + ": probando…")) return;
+    const r = await testNtfy(code); if (!replaceLast(label + ": " + r.text)) return;
+    if (r.ok) found.push({ letter: "N", kind: "ntfy", receive: code, label });
+  }
+  const letters = $("customBroker").value.trim() ? ["C"] : ["S", "H", "E"];
+  for (const l of letters) {
+    const label = "F · Mensajería " + mqttServer(l).name;
+    if (!out(label + ": probando…")) return;
+    const r = await testMqtt(l); if (!replaceLast(label + ": " + r.text)) return;
+    if (r.ok) found.push({ letter: l, kind: "mqtt:" + l, label });
+  }
+  if (!out("G · Conexión directa (WebRTC): probando…")) return;
+  if (!replaceLast("G · Conexión directa (WebRTC): " + await testWebRTC())) return;
+  out("H · Sonido: " + ((window.AudioContext || window.webkitAudioContext) ? "DISPONIBLE" : "NO DISPONIBLE") + " · Voz: " + ("speechSynthesis" in window ? speechSynthesis.getVoices().filter(v => /^es/i.test(v.lang)).length + " voces en español (pueden tardar en cargar)" : "NO DISPONIBLE"));
+  // preferencia: MQTT (más rápido) > ntfy WebSocket > ntfy eventos > ntfy consulta
+  const rank = (f) => f.kind.startsWith("mqtt") ? 0 : { ws: 1, sse: 2, poll: 3 }[f.receive];
+  best = found.sort((a, b) => rank(a) - rank(b))[0] || null;
+  out("CONCLUSIÓN: " + (best ? "el envío es posible desde este navegador usando «" + best.label.slice(4) + "»." : "ningún camino funcionó desde este navegador."));
+  $("roleRodi").disabled = !best;
+  $("roleHint").textContent = best ? "Pruebas terminadas. Rodi ya puede pulsar «Soy Rodi»." : "Desde este navegador no se puede enviar.";
+}
+$("rerun").addEventListener("click", runTests);
+runTests();
+
+// ================= Papeles =================
+let channel = null;
+const topics = (code) => ({ toPhone: "rdlink-" + code.toLowerCase() + "-a", toRodi: "rdlink-" + code.toLowerCase() + "-b" });
+const kindFromLetter = (l) => l === "N" ? "ntfy" : "mqtt:" + l;
+
+$("roleRodi").addEventListener("click", async () => {
+  if (!best) return;
+  $("roleRodi").classList.add("on"); $("roleRoxas").classList.remove("on");
+  $("rodiBox").classList.remove("hidden"); $("roxasBox").classList.add("hidden");
+  if (channel) channel.close();
+  const code = best.letter + rnd(6);
+  $("rodiCode").textContent = code; $("rodiStatus").textContent = "Conectando…";
+  const t = topics(code), sent = new Map(), log = [];
+  const render = () => { $("rodiLog").textContent = log.join("\n"); };
+  try {
+    channel = await openChannel(best.kind, { inTopic: t.toRodi, outTopic: t.toPhone, receive: best.receive }, (msg) => {
+      let m; try { m = JSON.parse(msg); } catch (e) { return; }
+      if (m.t === "hola") { log.unshift("Roxas se conectó a la sala."); render(); }
+      if (m.t === "ack" && sent.has(m.id)) { log.unshift("Roxas lo recibió · ida y vuelta " + Math.round(performance.now() - sent.get(m.id)) + " ms"); render(); }
+    });
+    $("rodiStatus").textContent = "Sala " + code + " abierta por " + channel.via + ". Pásale el código a Roxas y espera a «Roxas se conectó».";
+  } catch (e) { channel = null; $("rodiStatus").textContent = "No se pudo abrir la sala: " + e.message; }
+  $("rodiSend").onclick = async () => {
+    if (!channel) { $("rodiStatus").textContent = "Todavía no hay sala abierta."; return; }
+    const text = $("rodiText").value.trim(); if (!text) return;
+    const id = rnd(6); sent.set(id, performance.now());
+    try { await channel.send(JSON.stringify({ t: "narra", id, text })); log.unshift("Enviado: «" + text + "»"); }
+    catch (e) { log.unshift("No se pudo enviar: " + e.message); }
+    render();
+  };
+});
+
+$("roleRoxas").addEventListener("click", () => {
+  $("roleRoxas").classList.add("on"); $("roleRodi").classList.remove("on");
+  $("roxasBox").classList.remove("hidden"); $("rodiBox").classList.add("hidden");
+});
+function speak(text) {
+  if (!("speechSynthesis" in window)) return false;
+  const u = new SpeechSynthesisUtterance(text), es = speechSynthesis.getVoices().filter(v => /^es/i.test(v.lang));
+  const v = es.find(x => /es-MX|es-US|es-419/i.test(x.lang)) || es[0];
+  if (v) u.voice = v; u.lang = v ? v.lang : "es-MX";
+  speechSynthesis.speak(u); return true;
+}
+$("enableAudio").addEventListener("click", () => {
+  try { new (window.AudioContext || window.webkitAudioContext)().resume(); } catch (e) {}
+  $("enableAudio").textContent = speak("Sonido y voz activados.") ? "Sonido y voz activados" : "Este navegador no tiene voz";
+});
+$("roxasConnect").addEventListener("click", async () => {
+  const code = $("roxasCode").value.trim().toUpperCase();
+  if (code.length !== 7 || !/^[NSHEC]/.test(code)) { $("roxasStatus").textContent = "El código tiene 7 caracteres y empieza por N, S, H o E."; return; }
+  if (channel) channel.close();
+  $("roxasStatus").textContent = "Conectando…";
+  const t = topics(code), log = [];
+  try {
+    channel = await openChannel(kindFromLetter(code[0]), { inTopic: t.toPhone, outTopic: t.toRodi }, (msg) => {
+      let m; try { m = JSON.parse(msg); } catch (e) { return; }
+      if (m.t !== "narra" || typeof m.text !== "string") return;
+      const text = m.text.slice(0, 500);
+      $("subtitle").textContent = text;
+      const spoke = speak(text);
+      log.unshift("Recibido: «" + text + "»" + (spoke ? " · leído en voz alta" : " · sin voz"));
+      $("roxasLog").textContent = log.join("\n");
+      channel.send(JSON.stringify({ t: "ack", id: String(m.id || "").slice(0, 12) })).catch(() => {});
+    });
+    await channel.send(JSON.stringify({ t: "hola" }));
+    $("roxasStatus").textContent = "Conectado a la sala " + code + " por " + channel.via + ". Esperando frases de Rodi…";
+  } catch (e) { channel = null; $("roxasStatus").textContent = "No se pudo conectar: " + e.message; }
+});
+</script>
+</body>
+</html>
