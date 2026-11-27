@@ -928,7 +928,12 @@ const NOMBRES = { blanco: "#ffffff", negro: "#000000", gris: "#888888", "gris cl
   rosa: "#f48fb1", naranja: "#fb8c00", amarillo: "#fdd835", "amarillo claro": "#fff59d", verde: "#43a047", "verde claro": "#9ccc65", "verde oscuro": "#1b5e20",
   azul: "#1e88e5", "azul claro": "#90caf9", "azul oscuro": "#0d2a6b", celeste: "#87ceeb", cian: "#26c6da", morado: "#8e24aa", lila: "#ce93d8", violeta: "#7e57c2",
   "cafe": "#795548", "cafe claro": "#a1887f", "cafe oscuro": "#4e342e", marron: "#795548", piel: "#f1c27d", "piel oscura": "#8d5524", dorado: "#d4af37", plateado: "#c0c0c0",
-  crema: "#fff8e1", beige: "#e8d5b5", turquesa: "#1abc9c", gb1: "#e0f8d0", gb2: "#88c070", gb3: "#346856", gb4: "#081820", transparente: "#00000000" };
+  crema: "#fff8e1", beige: "#e8d5b5", turquesa: "#1abc9c", gb1: "#e0f8d0", gb2: "#88c070", gb3: "#346856", gb4: "#081820", transparente: "#00000000",
+  // piel real (de clara a oscura), sus luces y sombras, y detalles de cara
+  "piel muy clara": "#f9dcc4", "piel clara": "#f3c9a5", "piel media": "#e0ac82", "piel trigueña": "#c68a5e", "piel morena": "#a86b45", "piel muy oscura": "#5a3622",
+  "piel sombra fria": "#9a7070", "piel sombra calida": "#b5704f", "piel luz calida": "#ffe3c2", "piel luz fria": "#f4e6e6", rubor: "#e8968c", labios: "#c9686b", "labios oscuros": "#8a3f45",
+  "pelo negro": "#1c1714", "pelo castaño": "#5b3a22", "pelo castano": "#5b3a22", "pelo rubio": "#d8b25c", "pelo rojizo": "#a8452a", "pelo canoso": "#b8b4ae",
+  "iris cafe": "#5a3a1e", "iris azul": "#4f7fb8", "iris verde": "#5c8a4a", "blanco ojo": "#f3efe8", "sombra fria": "#3c4a6b", "luz calida": "#fff1c9" };
 const sinT = (t) => String(t).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 function hex(h) {
   h = h.replace("#", ""); if (h.length === 3) h = h.split("").map(c => c + c).join("");
@@ -939,7 +944,7 @@ function hex(h) {
 // ---------- documento ----------
 let doc, ordenes = [], rehacer = [];
 function docNuevo(w, h, fondo, pixel) {
-  return { w, h, fondo, pixel, capas: [{ nombre: "fondo" }], capa: 0, formas: [], sigId: 1, pincel: { g: pixel ? 1 : 4, c: [0, 0, 0, 1] }, paleta: {}, sellos: {}, simetria: null, portapapeles: null, nombre: "" };
+  return { w, h, fondo, pixel, capas: [{ nombre: "fondo" }], capa: 0, formas: [], sigId: 1, pincel: { g: pixel ? 1 : 4, c: [0, 0, 0, 1], tipo: "duro", tex: null, op: 1 }, paleta: {}, sellos: {}, simetria: null, portapapeles: null, nombre: "", sels: {}, sel: 0, selN: 0 };
 }
 doc = docNuevo(512, 512, [255, 255, 255, 1], false);
 function color(txt) {
@@ -982,12 +987,17 @@ function bezierPts(c) {
   return out;
 }
 function caja(f) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const s of f.caminos) for (const [x, y] of s.pts) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; } return { x0, y0, x1, y1 }; }
-function transformar(f, fn) { f.caminos.forEach(s => { s.pts = s.pts.map(fn); }); }
+function transformar(f, fn) { f.caminos.forEach(s => { s.pts = s.pts.map(fn); }); if (f.ctrl) f.ctrl = f.ctrl.map(fn); }
+function regenerar(f) {   // formas editables: su camino sale de sus puntos de control (se pueden mover después)
+  const c = f.ctrl, g = f.gen; if (!c) return;
+  f.caminos[0].pts = g === "curva" ? catmull(c, false) : g === "forma suave" ? catmull(c, true) : g === "bezier" ? bezierPts(c) : g === "pinta" ? (c.length >= 3 ? catmull(c, false) : c.map(p => p.slice())) : c.map(p => p.slice());
+}
 
 // ---------- formas ----------
 // forma: { id, capa, tipo, caminos:[{pts, cerrado}], relleno, borde:{g,c}|null, ef:{…}, pixel? , texto? }
 function crear(tipo, caminos, relleno, borde, extra) {
   const f = Object.assign({ id: doc.sigId++, capa: doc.capa, tipo, caminos, relleno, borde, ef: {} }, extra || {});
+  if (doc.sel) f.clip = doc.sel;   // con selección activa, lo nuevo solo pinta dentro
   doc.formas.push(f); const ids = [f.id];
   if (doc.simetria && tipo !== "relleno") {
     const g = JSON.parse(JSON.stringify(f)); g.id = doc.sigId++; g.espejoDe = f.id;
@@ -1007,6 +1017,21 @@ function opciones(toks) {   // «relleno COLOR», «borde G COLOR», «grosor G�
   return o;
 }
 function estiloCerrado(o) { return { relleno: o.relleno || null, borde: o.borde || (o.relleno && !o.sinBorde ? null : o.sinBorde ? null : { g: doc.pincel.g, c: doc.pincel.c }) }; }
+function crearPincelada(pts, a, borrar) {   // «pinta» con el pincel actual (o «borra trazo»): grosor 12 o 12-2 o 4-14-2, opacidad 40%, color
+  a = a.slice(); const pc = doc.pincel; let g = [pc.g], op = pc.op, tipo = pc.tipo, tex = pc.tex;
+  const ig = a.findIndex(x => sinT(x) === "grosor"); if (ig >= 0) { g = String(a[ig + 1] || "").split("-").map(Number).filter(v => v > 0); if (!g.length) throw new Error("grosor 12 o grosor 12-2"); a.splice(ig, 2); }
+  const io = a.findIndex(x => sinT(x) === "opacidad" || sinT(x) === "fuerza"); if (io >= 0) { op = Math.max(1, Math.min(100, parseFloat(a[io + 1]))) / 100; a.splice(io, 2); }
+  if (borrar) { tipo = "duro"; tex = null; if (ig < 0) g = [Math.max(8, pc.g)]; if (io < 0) op = 1; const it = a.findIndex(x => /^(suave|duro)$/.test(sinT(x))); if (it >= 0) { tipo = sinT(a[it]); a.splice(it, 1); } }
+  const c = borrar ? [0, 0, 0, 1] : a.length ? color(a.join(" ")) : pc.c; if (!c) throw new Error("color «" + a.join(" ") + "» desconocido");
+  g = g.map(v => Math.min(400, v));
+  return crear("pincelada", [{ pts: pts.length >= 3 ? catmull(pts, false) : pts.map(p => p.slice()), cerrado: false }], null, null, { ctrl: pts, gen: "pinta", pc: { tipo, tex, g, c, op, borrar } });
+}
+function bordeLibre(toks) {   // «borde G COLOR» o, como en linea, «G COLOR» / «COLOR» sueltos; si no, el pincel
+  const o = opciones(toks); if (o.borde) return o.borde;
+  if (!toks.length) return { g: doc.pincel.g, c: doc.pincel.c };
+  const g = isFinite(+toks[0]) ? +toks[0] : doc.pincel.g, c = color(toks.slice(isFinite(+toks[0]) ? 1 : 0).join(" ")) || (toks.length > (isFinite(+toks[0]) ? 1 : 0) ? null : doc.pincel.c);
+  if (!c) throw new Error("color «" + toks.slice(isFinite(+toks[0]) ? 1 : 0).join(" ") + "» desconocido"); return { g, c };
+}
 function puntos(toks) { const pts = []; for (const t of toks) { const p = P(t); if (!p) break; pts.push(p); } return pts; }
 
 // ---------- rasterizado ----------
@@ -1060,9 +1085,10 @@ function borrosa(m, r) {   // tres pasadas de caja ≈ desenfoque suave; amplía
   return n;
 }
 function unir(a, b) { const m = mascara(Math.min(a.x0, b.x0), Math.min(a.y0, b.y0), Math.max(a.x0 + a.w, b.x0 + b.w), Math.max(a.y0 + a.h, b.y0 + b.h)); for (const s of [a, b]) for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) { const i = (y + s.y0 - m.y0) * m.w + (x + s.x0 - m.x0); m.d[i] = Math.max(m.d[i], s.d[y * s.w + x]); } return m; }
+let CLIPM = null;   // selección activa mientras se dibuja una forma (0..255 por pixel)
 function pintar(buf, m, colorDe, alfa = 1, dx = 0, dy = 0) {   // compone la máscara sobre la capa (alfa normal)
   for (let y = 0; y < m.h; y++) { const Y = y + m.y0 + dy; if (Y < 0 || Y >= doc.h) continue;
-    for (let x = 0; x < m.w; x++) { const X = x + m.x0 + dx; if (X < 0 || X >= doc.w) continue; const cov = m.d[y * m.w + x]; if (cov <= 0) continue;
+    for (let x = 0; x < m.w; x++) { const X = x + m.x0 + dx; if (X < 0 || X >= doc.w) continue; let cov = m.d[y * m.w + x]; if (cov <= 0) continue; if (CLIPM) { cov *= CLIPM[Y * doc.w + X] / 255; if (cov <= 0) continue; }
       const c = colorDe(X, Y), a = cov * alfa * c[3]; if (a <= 0) continue; const i = (Y * doc.w + X) * 4, da = buf[i + 3] / 255, oa = a + da * (1 - a);
       for (let k = 0; k < 3; k++) buf[i + k] = oa ? (c[k] * a + buf[i + k] * da * (1 - a)) / oa : 0; buf[i + 3] = oa * 255; } }
 }
@@ -1070,36 +1096,131 @@ function colorFuncion(f, base) {
   const ef = f.ef, b = caja(f), W = Math.max(1, b.x1 - b.x0), H = Math.max(1, b.y1 - b.y0);
   return (X, Y) => {
     let c = base;
-    if (ef.degradado) { const g = ef.degradado; let t;
-      if (g.modo === "radial") { const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2; t = Math.min(1, Math.hypot(X - cx, Y - cy) / (Math.max(W, H) / 2)); }
-      else t = g.modo === "horizontal" ? (X - b.x0) / W : (Y - b.y0) / H;
-      t = Math.max(0, Math.min(1, t)); c = [0, 1, 2, 3].map(k => g.c1[k] + (g.c2[k] - g.c1[k]) * t); }
+    if (ef.degradado) { const g = ef.degradado, cs = g.cs || [g.c1, g.c2]; let t;
+      if (g.modo === "radial") { const cx = g.centro ? g.centro[0] : (b.x0 + b.x1) / 2, cy = g.centro ? g.centro[1] : (b.y0 + b.y1) / 2, R = Math.max(Math.hypot(b.x0 - cx, b.y0 - cy), Math.hypot(b.x1 - cx, b.y0 - cy), Math.hypot(b.x0 - cx, b.y1 - cy), Math.hypot(b.x1 - cx, b.y1 - cy)) || 1; t = Math.hypot(X - cx, Y - cy) / (g.centro ? R : Math.max(W, H) / 2); }
+      else t = g.modo === "horizontal" ? (X - b.x0) / W : g.modo === "diagonal" ? ((X - b.x0) / W + (Y - b.y0) / H) / 2 : (Y - b.y0) / H;
+      t = Math.max(0, Math.min(1, t)) * (cs.length - 1); const k0 = Math.min(cs.length - 2, Math.floor(t)), u = t - k0; c = [0, 1, 2, 3].map(k => cs[k0][k] + (cs[k0 + 1][k] - cs[k0][k]) * u); }
     if (ef.brillo) { const t = Math.max(0, 1 - (Y - b.y0) / (H * 0.6)) * ef.brillo; c = [c[0] + (255 - c[0]) * t, c[1] + (255 - c[1]) * t, c[2] + (255 - c[2]) * t, c[3]]; }
     if (ef.textura) { let h = (X * 374761393 + Y * 668265263) >>> 0; h = (h ^ (h >>> 13)) * 1274126177 >>> 0; if ((h & 255) > 180) c = [c[0] * 0.82, c[1] * 0.82, c[2] * 0.82, c[3]]; }
     return c;
   };
 }
+// Caché por capa: cada capa guarda lo ya pintado; una orden nueva solo pinta lo suyo. Si se cambia o borra una forma ya pintada,
+// solo esa capa se repinta. Memoria: 4 bytes por pixel y capa (2048×2048 = 16 MB por capa).
+let CACHE = null;
+const firma = (f) => f.id + ":" + (f.v || 0);
+function capaVacia(ci, b) { if (b) b.fill(0); else b = new Uint8ClampedArray(doc.w * doc.h * 4); if (ci === 0) for (let i = 0; i < doc.w * doc.h; i++) { b[i * 4] = doc.fondo[0]; b[i * 4 + 1] = doc.fondo[1]; b[i * 4 + 2] = doc.fondo[2]; b[i * 4 + 3] = doc.fondo[3] * 255; } return b; }
 function renderizar() {
-  const out = new Uint8ClampedArray(doc.w * doc.h * 4);
-  for (let i = 0; i < doc.w * doc.h; i++) { out[i * 4] = doc.fondo[0]; out[i * 4 + 1] = doc.fondo[1]; out[i * 4 + 2] = doc.fondo[2]; out[i * 4 + 3] = doc.fondo[3] * 255; }
+  if (!CACHE || CACHE.doc !== doc || CACHE.w !== doc.w || CACHE.h !== doc.h || CACHE.fondo !== doc.fondo.join()) {
+    const mismo = CACHE && CACHE.w === doc.w && CACHE.h === doc.h, viejo = CACHE;
+    CACHE = { doc, w: doc.w, h: doc.h, fondo: doc.fondo.join(), capas: [], sel: new Map(), out: mismo ? viejo.out : null };
+    if (mismo) viejo.capas.forEach((c, i) => { if (c) CACHE.capas[i] = { buf: c.buf, lista: ["(reusar)"] }; });   // misma memoria; se repinta
+  }
   for (let ci = 0; ci < doc.capas.length; ci++) {
-    if (doc.capas[ci].oculta) continue;
-    const capa = ci === 0 ? out : new Uint8ClampedArray(doc.w * doc.h * 4);
-    for (const f of doc.formas) {
-      if (f.capa !== ci) continue;
-      if (f.tipo === "relleno") { inundar(ci === 0 ? out : capa, f.punto, f.relleno); continue; }
-      const alfa = f.ef.opacidad == null ? 1 : f.ef.opacidad;
-      let mf = f.relleno ? rellenoMasc(f.caminos.filter(s => s.cerrado), doc.pixel) : null;
-      let mb = f.borde && f.borde.c ? trazoMasc(f.caminos, f.borde.g, doc.pixel) : null;
-      if (f.ef.difumina) { if (mf) mf = borrosa(mf, f.ef.difumina); if (mb) mb = borrosa(mb, f.ef.difumina); }
-      if (f.ef.sombra) { const s = f.ef.sombra, base = mf && mb ? unir(mf, mb) : mf || mb; if (base) pintar(capa, s.suave ? borrosa(base, s.suave) : base, () => s.c, s.op * alfa, Math.round(s.dx), Math.round(s.dy)); }
-      if (mf) pintar(capa, mf, colorFuncion(f, f.relleno), alfa);
-      if (mb) pintar(capa, mb, colorFuncion(f, f.borde.c), alfa);
-      if (f.ef.contorno) pintar(capa, trazoMasc(f.caminos, f.ef.contorno.g, doc.pixel), () => f.ef.contorno.c, alfa);
+    const fs_ = doc.formas.filter(f => f.capa === ci); let c = CACHE.capas[ci];
+    if (!c || c.lista.length > fs_.length || c.lista.some((x, k) => x !== firma(fs_[k]))) c = CACHE.capas[ci] = { buf: capaVacia(ci, c && c.buf), lista: [] };   // reusa su memoria
+    for (let k = c.lista.length; k < fs_.length; k++) { dibujarForma(c.buf, fs_[k], ci); c.lista.push(firma(fs_[k])); }
+  }
+  CACHE.capas.length = doc.capas.length;
+  const out = CACHE.out || (CACHE.out = new Uint8ClampedArray(doc.w * doc.h * 4));   // la imagen final reusa siempre el mismo espacio
+  if (doc.capas[0].oculta) capaVacia(0, out); else out.set(CACHE.capas[0].buf);
+  for (let ci = 1; ci < doc.capas.length; ci++) {
+    const k = doc.capas[ci]; if (k.oculta) continue;
+    const b = CACHE.capas[ci].buf, op = k.op == null ? 1 : k.op, modo = k.modo || "normal";
+    for (let i = 0; i < out.length; i += 4) {
+      const a = b[i + 3] / 255 * op; if (a <= 0) continue; const da = out[i + 3] / 255, oa = a + da * (1 - a);
+      for (let j = 0; j < 3; j++) { const d = out[i + j], s_ = b[i + j];
+        const m = modo === "multiplicar" ? d * s_ / 255 : modo === "pantalla" ? 255 - (255 - d) * (255 - s_) / 255 : modo === "superponer" ? (d < 128 ? 2 * d * s_ / 255 : 255 - 2 * (255 - d) * (255 - s_) / 255) : s_;
+        const mix = d * (1 - da) + m * da;   // sobre lo transparente, el color propio
+        out[i + j] = oa ? (mix * a + d * da * (1 - a)) / oa : 0; }
+      out[i + 3] = oa * 255;
     }
-    if (ci > 0) pintar(out, { x0: 0, y0: 0, w: doc.w, h: doc.h, d: Float32Array.from({ length: doc.w * doc.h }, (_, i) => capa[i * 4 + 3] / 255) }, (X, Y) => { const i = (Y * doc.w + X) * 4; return [capa[i], capa[i + 1], capa[i + 2], 1]; });
   }
   return out;
+}
+function mascaraSel(id) {   // selección como máscara del lienzo entero (0..255), guardada en la caché
+  if (!id || !doc.sels[id]) return null;
+  if (CACHE && CACHE.sel.has(id)) return CACHE.sel.get(id);
+  const s = doc.sels[id]; let m = new Uint8Array(doc.w * doc.h);
+  if (s.tipo === "varita") { let i = 0, v = 0; for (const t of s.rle.split(".")) { if (!t) continue; const n = parseInt(t, 36); if (v) m.fill(255, i, i + n); i += n; v ^= 1; } }
+  else { const mk = rellenoMasc(s.caminos, doc.pixel); for (let y = 0; y < mk.h; y++) for (let x = 0; x < mk.w; x++) { const X = x + mk.x0, Y = y + mk.y0; if (X >= 0 && Y >= 0 && X < doc.w && Y < doc.h) m[Y * doc.w + X] = Math.round(mk.d[y * mk.w + x] * 255); } }
+  if (s.inv) for (let i = 0; i < m.length; i++) m[i] = 255 - m[i];
+  if (CACHE) CACHE.sel.set(id, m); return m;
+}
+function dibujarForma(capa, f, ci) {
+  CLIPM = f.clip ? mascaraSel(f.clip) : null;
+  try {
+    if (f.tipo === "relleno") { inundar(capa, f.punto, f.relleno); return; }
+    if (f.tipo === "pincelada") { const m = pinceladaMasc(f); if (f.pc.borrar) borrarMasc(capa, m, f.pc.op, ci); else pintar(capa, m, () => f.pc.c, f.pc.op * (f.ef.opacidad == null ? 1 : f.ef.opacidad)); return; }
+    if (f.tipo === "mezcla") { mezclar(capa, f); return; }
+    const alfa = f.ef.opacidad == null ? 1 : f.ef.opacidad;
+    let mf = f.relleno ? rellenoMasc(f.caminos.filter(s => s.cerrado), doc.pixel) : null;
+    let mb = f.borde && f.borde.c ? trazoMasc(f.caminos, f.borde.g, doc.pixel) : null;
+    if (f.ef.difumina) { if (mf) mf = borrosa(mf, f.ef.difumina); if (mb) mb = borrosa(mb, f.ef.difumina); }
+    if (f.ef.sombra) { const s = f.ef.sombra, base = mf && mb ? unir(mf, mb) : mf || mb; if (base) pintar(capa, s.suave ? borrosa(base, s.suave) : base, () => s.c, s.op * alfa, Math.round(s.dx), Math.round(s.dy)); }
+    if (mf) pintar(capa, mf, colorFuncion(f, f.relleno), alfa);
+    if (mb) pintar(capa, mb, colorFuncion(f, f.borde.c), alfa);
+    if (f.ef.contorno) pintar(capa, trazoMasc(f.caminos, f.ef.contorno.g, doc.pixel), () => f.ef.contorno.c, alfa);
+  } finally { CLIPM = null; }
+}
+// ---------- pinceles: duro, suave (aerógrafo) y con textura (pelo, tela, piel); grosor que cambia a lo largo del trazo ----------
+function ruido(x, y) { let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)) >>> 0; h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0; return ((h ^ (h >>> 16)) & 1023) / 1023; }
+function grosorEn(gs, t) { if (gs.length === 1) return gs[0]; const u = t * (gs.length - 1), k = Math.min(gs.length - 2, Math.floor(u)); return gs[k] + (gs[k + 1] - gs[k]) * (u - k); }
+function pinceladaMasc(f) {
+  const p = f.caminos[0].pts, pc = f.pc, gmax = Math.max(...pc.g), R = gmax / 2 + 2, b = caja(f), m = mascara(b.x0 - R, b.y0 - R, b.x1 + R, b.y1 + R); if (!m.w || !m.h) return m;
+  const acc = [0]; for (let i = 1; i < p.length; i++) acc.push(acc[i - 1] + Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]));
+  const L = acc[acc.length - 1];
+  const sello = (cx, cy, r, ux, uy) => {
+    const x0 = Math.max(m.x0, Math.floor(cx - r - 1)), x1 = Math.min(m.x0 + m.w, Math.ceil(cx + r + 1)), y0 = Math.max(m.y0, Math.floor(cy - r - 1)), y1 = Math.min(m.y0 + m.h, Math.ceil(cy + r + 1));
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+      const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy); let cov;
+      if (pc.tipo === "suave") { if (d >= r) continue; const q = d / r; cov = (1 - q * q) * (1 - q * q); }
+      else if (doc.pixel) cov = d <= Math.max(0.5, r) ? 1 : 0;
+      else cov = Math.max(0, Math.min(1, r + 0.5 - d));
+      if (pc.tipo === "textura" && cov > 0) {
+        if (pc.tex === "pelo") { const n = x * -uy + y * ux, h0 = ruido(Math.floor(n * 0.8), 7), h1 = ruido(Math.floor(n * 0.8) + 1, 7), f_ = n * 0.8 - Math.floor(n * 0.8); cov *= 0.15 + 0.85 * Math.pow(h0 + (h1 - h0) * f_, 1.6); }   // hebras paralelas al trazo
+        else if (pc.tex === "tela") cov *= 0.55 + 0.45 * Math.abs(Math.sin(x * 1.3) * Math.sin(y * 1.3));
+        else cov *= ruido(x, y) > 0.8 ? 0.7 : 0.9 + 0.1 * ruido(x + 99, y);
+      }
+      const i = (y - m.y0) * m.w + (x - m.x0); if (cov > m.d[i]) m.d[i] = cov;
+    }
+  };
+  if (p.length === 1 || L === 0) { sello(p[0][0], p[0][1], pc.g[0] / 2, 1, 0); return m; }
+  let s = 0, k = 1;
+  while (s <= L) {
+    while (k < p.length - 1 && acc[k] < s) k++;
+    const a = p[k - 1], q = p[k], seg = acc[k] - acc[k - 1] || 1, u = Math.max(0, Math.min(1, (s - acc[k - 1]) / seg)), ux = (q[0] - a[0]) / seg, uy = (q[1] - a[1]) / seg;
+    const r = Math.max(0.3, grosorEn(pc.g, s / L) / 2);
+    sello(a[0] + (q[0] - a[0]) * u, a[1] + (q[1] - a[1]) * u, r, ux, uy);
+    s += Math.max(0.35, r * (pc.tipo === "suave" ? 0.15 : 0.25));
+  }
+  return m;
+}
+function borrarMasc(capa, m, op, ci) {   // borrador: en la capa de fondo devuelve el color del fondo; en las demás, la deja transparente
+  const bg = doc.fondo;
+  for (let y = 0; y < m.h; y++) for (let x = 0; x < m.w; x++) { const X = x + m.x0, Y = y + m.y0; if (X < 0 || Y < 0 || X >= doc.w || Y >= doc.h) continue;
+    let a = m.d[y * m.w + x] * op; if (CLIPM) a *= CLIPM[Y * doc.w + X] / 255; if (a <= 0) continue; const i = (Y * doc.w + X) * 4;
+    if (ci === 0) { for (let k = 0; k < 3; k++) capa[i + k] = capa[i + k] * (1 - a) + bg[k] * a; capa[i + 3] = capa[i + 3] * (1 - a) + bg[3] * 255 * a; }
+    else capa[i + 3] = capa[i + 3] * (1 - a); }
+}
+function mezclar(capa, f) {   // «dedo»: suaviza la unión de tonos alrededor de cada punto del camino
+  const W = doc.w, H = doc.h, R = f.mz.r, fuerza = f.mz.f, k = Math.max(1, Math.round(R / 3)), p = f.caminos[0].pts, pts = [];
+  for (let i = 0; i < p.length; i++) { pts.push(p[i]); if (i + 1 < p.length) { const d = Math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]), n = Math.floor(d / Math.max(1, R / 2)); for (let j = 1; j < n; j++) pts.push([p[i][0] + (p[i + 1][0] - p[i][0]) * j / n, p[i][1] + (p[i + 1][1] - p[i][1]) * j / n]); } }
+  for (const [cx, cy] of pts) {
+    const x0 = Math.max(0, Math.floor(cx - R - k)), x1 = Math.min(W, Math.ceil(cx + R + k)), y0 = Math.max(0, Math.floor(cy - R - k)), y1 = Math.min(H, Math.ceil(cy + R + k)), w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
+    const src = new Float32Array(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = ((y + y0) * W + x + x0) * 4, o = (y * w + x) * 4, a = capa[i + 3] / 255; src[o] = capa[i] * a; src[o + 1] = capa[i + 1] * a; src[o + 2] = capa[i + 2] * a; src[o + 3] = capa[i + 3]; }
+    const tmp = new Float32Array(src.length);
+    for (let pasada = 0; pasada < 2; pasada++) {
+      for (let y = 0; y < h; y++) for (let c = 0; c < 4; c++) { let acc = 0, n = 0; for (let x = -k; x <= k; x++) if (x >= 0 && x < w) { acc += src[(y * w + x) * 4 + c]; n++; } for (let x = 0; x < w; x++) { tmp[(y * w + x) * 4 + c] = acc / n; const a = x - k, b = x + k + 1; if (a >= 0) { acc -= src[(y * w + a) * 4 + c]; n--; } if (b < w) { acc += src[(y * w + b) * 4 + c]; n++; } } }
+      for (let x = 0; x < w; x++) for (let c = 0; c < 4; c++) { let acc = 0, n = 0; for (let y = -k; y <= k; y++) if (y >= 0 && y < h) { acc += tmp[(y * w + x) * 4 + c]; n++; } for (let y = 0; y < h; y++) { src[(y * w + x) * 4 + c] = acc / n; const a = y - k, b = y + k + 1; if (a >= 0) { acc -= tmp[(a * w + x) * 4 + c]; n--; } if (b < h) { acc += tmp[(b * w + x) * 4 + c]; n++; } } }
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const d = Math.hypot(x + x0 + 0.5 - cx, y + y0 + 0.5 - cy); if (d >= R) continue; const q = d / R; let wgt = (1 - q * q) * (1 - q * q) * fuerza;
+      const I = (y + y0) * W + x + x0; if (CLIPM) wgt *= CLIPM[I] / 255; if (wgt <= 0) continue;
+      const i = I * 4, o = (y * w + x) * 4, na = src[o + 3], un = na > 0 ? 255 / na : 0;
+      for (let c = 0; c < 3; c++) capa[i + c] = capa[i + c] * (1 - wgt) + src[o + c] * un * wgt; capa[i + 3] = capa[i + 3] * (1 - wgt) + na * wgt;
+    }
+  }
 }
 function inundar(buf, [px, py], c) {   // bote de pintura (sobre lo pintado en esta capa hasta ese momento)
   px = Math.floor(px); py = Math.floor(py); if (px < 0 || py < 0 || px >= doc.w || py >= doc.h) return;
@@ -1107,7 +1228,7 @@ function inundar(buf, [px, py], c) {   // bote de pintura (sobre lo pintado en e
   const igual = (i) => Math.abs(buf[i] - t[0]) + Math.abs(buf[i + 1] - t[1]) + Math.abs(buf[i + 2] - t[2]) + Math.abs(buf[i + 3] - t[3]) <= 60;
   const visto = new Uint8Array(doc.w * doc.h), pila = [py * doc.w + px];
   while (pila.length) { const p = pila.pop(); if (visto[p]) continue; visto[p] = 1; if (!igual(p * 4)) continue;
-    const a = c[3]; buf[p * 4] = c[0] * a + buf[p * 4] * (1 - a); buf[p * 4 + 1] = c[1] * a + buf[p * 4 + 1] * (1 - a); buf[p * 4 + 2] = c[2] * a + buf[p * 4 + 2] * (1 - a); buf[p * 4 + 3] = Math.max(buf[p * 4 + 3], a * 255);
+    const a = c[3] * (CLIPM ? CLIPM[p] / 255 : 1); buf[p * 4] = c[0] * a + buf[p * 4] * (1 - a); buf[p * 4 + 1] = c[1] * a + buf[p * 4 + 1] * (1 - a); buf[p * 4 + 2] = c[2] * a + buf[p * 4 + 2] * (1 - a); buf[p * 4 + 3] = Math.max(buf[p * 4 + 3], a * 255);
     const x = p % doc.w, y = (p / doc.w) | 0; if (x > 0) pila.push(p - 1); if (x < doc.w - 1) pila.push(p + 1); if (y > 0) pila.push(p - doc.w); if (y < doc.h - 1) pila.push(p + doc.w); }
 }
 
@@ -1142,14 +1263,45 @@ function ejecutarOrden(linea, reproduciendo) {
       doc.formas.forEach(f => { transformar(f, ([x, y]) => [x * fx, y * fy]); if (f.borde) f.borde.g *= (fx + fy) / 2; if (f.punto) f.punto = [f.punto[0] * fx, f.punto[1] * fy]; if (f.ef.contorno) f.ef.contorno.g *= (fx + fy) / 2; });
       doc.w = w; doc.h = h; return "✓ lienzo cambiado a " + w + "×" + h + " (las formas se ajustaron)";
     }
-    case "pincel": { const g = NUM(r[0], "pincel"), c = color(r.slice(1).join(" ")); if (!c) throw new Error("color desconocido"); doc.pincel = { g, c }; return "✓ pincel " + g + " px"; }
+    case "pincel": {
+      let tipo = "duro", tex = null, a = r.slice(); const t0 = sinT(a[0] || "");
+      if (t0 === "duro" || t0 === "suave") { tipo = t0; a = a.slice(1); } else if (t0 === "textura") { tipo = "textura"; tex = sinT(a[1] || ""); if (!["pelo", "tela", "piel"].includes(tex)) throw new Error("pincel textura pelo|tela|piel TAMAÑO COLOR"); a = a.slice(2); }
+      let op = 1; const io = a.findIndex(x => sinT(x) === "opacidad"); if (io >= 0) { op = Math.max(1, Math.min(100, parseFloat(a[io + 1]))) / 100; a.splice(io, 2); }
+      const g = NUM(a[0], "pincel"), c = color(a.slice(1).join(" ")); if (!c) throw new Error("pincel [duro|suave|textura pelo|tela|piel] TAMAÑO COLOR [opacidad 50%]");
+      doc.pincel = { g, c, tipo, tex, op }; return "✓ pincel " + tipo + (tex ? " " + tex : "") + " " + g + " px" + (op < 1 ? " · opacidad " + Math.round(op * 100) + "%" : "");
+    }
+    case "pinta": case "mezcla": {
+      const pts = puntos(r); if (!pts.length) throw new Error(cmd === "pinta" ? "pinta x,y x,y … [grosor 12-2] [COLOR] [opacidad 40%]" : "mezcla x,y [x,y …] RADIO [fuerza 60%]");
+      let a = r.slice(pts.length);
+      if (cmd === "mezcla") { const R = NUM(a[0], "mezcla"), mf = a.join(" ").match(/fuerza\s+(\d{1,3})%?/i); return res(crear("mezcla", [{ pts, cerrado: false }], null, null, { mz: { r: Math.max(2, Math.min(200, R)), f: mf ? Math.min(100, +mf[1]) / 100 : 0.7 } }), "mezcla"); }
+      return res(crearPincelada(pts, a, false), "pincelada");
+    }
+    case "seleccion": case "mascara": case "varita": {
+      const k = cmd === "varita" ? "varita" : sinT(r[0] || "");
+      if (k === "no" || k === "quita") { doc.sel = 0; return "✓ sin selección: se pinta en todo el lienzo"; }
+      if (k === "invierte") { const s0 = doc.sels[doc.sel]; if (!s0) throw new Error("no hay selección activa"); const id = ++doc.selN; doc.sels[id] = Object.assign({}, s0, { inv: !s0.inv }); doc.sel = id; return "✓ selección invertida (" + id + ")"; }
+      let s0;
+      if (k === "lazo") { const pts = puntos(r.slice(1)); if (pts.length < 3) throw new Error("seleccion lazo x,y x,y x,y …"); s0 = { tipo: "lazo", caminos: [{ pts, cerrado: true }] }; }
+      else if (k === "rect" || k === "rectangulo") { const a = P(r[1]), b = P(r[2]); if (!a || !b) throw new Error("seleccion rect x,y x,y"); s0 = { tipo: "rect", caminos: [{ pts: [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]], cerrado: true }] }; }
+      else if (k === "circulo") { const c = P(r[1]), R = NUM(r[2], "seleccion circulo"); if (!c) throw new Error("seleccion circulo x,y R"); s0 = { tipo: "circulo", caminos: [{ pts: circuloPts(c[0], c[1], R, R), cerrado: true }] }; }
+      else if (k === "forma") { const f = forma(r[1]); if (!f) throw new Error((cmd === "mascara" ? "mascara" : "seleccion") + " forma N"); const cs = f.caminos.filter(x => x.cerrado); if (!cs.length) throw new Error("la forma " + f.id + " no es cerrada"); s0 = { tipo: "forma", caminos: JSON.parse(JSON.stringify(cs)) }; }
+      else if (k === "varita") {
+        const pp = P(cmd === "varita" ? r[0] : r[1]), mt = r.join(" ").match(/tolerancia\s+(\d+)/i), tol = mt ? Math.min(255, +mt[1]) : 40; if (!pp) throw new Error("varita x,y [tolerancia 40]");
+        const img = renderizar(), W = doc.w, H = doc.h, x0 = Math.floor(pp[0]), y0 = Math.floor(pp[1]); if (x0 < 0 || y0 < 0 || x0 >= W || y0 >= H) throw new Error("el punto está fuera del lienzo");
+        const i0 = (y0 * W + x0) * 4, m = new Uint8Array(W * H), pila = [y0 * W + x0];
+        while (pila.length) { const q = pila.pop(); if (m[q]) continue; const i = q * 4; if (Math.abs(img[i] - img[i0]) + Math.abs(img[i + 1] - img[i0 + 1]) + Math.abs(img[i + 2] - img[i0 + 2]) > tol) continue; m[q] = 255; const x = q % W, y = (q / W) | 0; if (x > 0) pila.push(q - 1); if (x < W - 1) pila.push(q + 1); if (y > 0) pila.push(q - W); if (y < H - 1) pila.push(q + W); }
+        let rle = "", v = 0, n = 0; for (let i = 0; i <= m.length; i++) { const b = i < m.length ? (m[i] ? 1 : 0) : -1; if (b === v) n++; else { rle += n.toString(36) + "."; v = b; n = 1; } }   // comprimida: tramos alternos 0/1
+        s0 = { tipo: "varita", rle };
+      } else throw new Error("seleccion lazo|rect|circulo|forma … · varita x,y · mascara forma N · seleccion invierte|no");
+      const id = ++doc.selN; doc.sels[id] = s0; doc.sel = id; return "✓ selección " + id + " (" + s0.tipo + "): lo que pintes ahora solo cae dentro · «seleccion no» para quitarla";
+    }
     case "paleta": {
       if (!r.length) return "Paleta: " + (Object.keys(doc.paleta).join(", ") || "(vacía)") + " · nombres fijos: " + Object.keys(NOMBRES).join(", ");
       const c = color(r.slice(1).join(" ")); if (!c) throw new Error("color desconocido"); doc.paleta[sinT(r[0])] = c; return "✓ color «" + r[0] + "» guardado en la paleta";
     }
     case "linea": { const pts = puntos(r); if (pts.length < 2) throw new Error("linea x,y x,y [grosor] [color]"); const g = r[2] && isFinite(+r[2]) ? +r[2] : doc.pincel.g, c = color(r.slice(r[2] && isFinite(+r[2]) ? 3 : 2).join(" ")) || doc.pincel.c; return res(crear("linea", [{ pts: pts.slice(0, 2), cerrado: false }], null, { g, c }), "línea"); }
-    case "trazo": case "curva": { const pts = puntos(r); if (pts.length < 2) throw new Error(cmd + " necesita al menos 2 puntos"); const o = opciones(r.slice(pts.length)); return res(crear(cmd, [{ pts: cmd === "curva" ? catmull(pts, false) : pts, cerrado: false }], null, o.borde || { g: doc.pincel.g, c: doc.pincel.c }), cmd); }
-    case "bezier": { const pts = puntos(r); if (pts.length < 3 || pts.length > 4) throw new Error("bezier inicio imán [imán] fin (3 o 4 puntos)"); const o = opciones(r.slice(pts.length)); return res(crear("bezier", [{ pts: bezierPts(pts), cerrado: false }], null, o.borde || { g: doc.pincel.g, c: doc.pincel.c }), "curva bezier"); }
+    case "trazo": case "curva": { const pts = puntos(r); if (pts.length < 2) throw new Error(cmd + " necesita al menos 2 puntos"); return res(crear(cmd, [{ pts: cmd === "curva" ? catmull(pts, false) : pts.map(p => p.slice()), cerrado: false }], null, bordeLibre(r.slice(pts.length)), { ctrl: pts, gen: cmd }), cmd); }
+    case "bezier": { const pts = puntos(r); if (pts.length < 3 || pts.length > 4) throw new Error("bezier inicio imán [imán] fin (3 o 4 puntos)"); return res(crear("bezier", [{ pts: bezierPts(pts), cerrado: false }], null, bordeLibre(r.slice(pts.length)), { ctrl: pts, gen: "bezier" }), "curva bezier"); }
     case "arco": {
       const c = P(r[0]); const rad = NUM(r[1], "arco"); const i = r.findIndex(t => sinT(t) === "desde"), j = r.findIndex(t => sinT(t) === "hasta");
       if (!c || i < 0 || j < 0) throw new Error("arco x,y radio desde GRADOS hasta GRADOS (0° a la derecha, girando hacia abajo)");
@@ -1166,11 +1318,11 @@ function ejecutarOrden(linea, reproduciendo) {
       const rx = NUM(r[1], cmd), ry = cmd === "elipse" ? NUM(r[2], cmd) : rx, e = estiloCerrado(opciones(r.slice(cmd === "elipse" ? 3 : 2)));
       return res(crear(cmd, [{ pts: circuloPts(c[0], c[1], rx, ry), cerrado: true }], e.relleno, e.borde), cmd === "elipse" ? "elipse" : "círculo");
     }
-    case "poligono": { const pts = puntos(r); if (pts.length < 3) throw new Error("poligono necesita 3 puntos o más"); const e = estiloCerrado(opciones(r.slice(pts.length))); return res(crear("poligono", [{ pts, cerrado: true }], e.relleno, e.borde), "polígono"); }
+    case "poligono": { const pts = puntos(r); if (pts.length < 3) throw new Error("poligono necesita 3 puntos o más"); const e = estiloCerrado(opciones(r.slice(pts.length))); return res(crear("poligono", [{ pts, cerrado: true }], e.relleno, e.borde, { ctrl: pts.map(p => p.slice()), gen: "poligono" }), "polígono"); }
     case "forma": {
       if (sinT(r[0] || "") !== "suave") throw new Error("forma suave x,y x,y x,y … [relleno COLOR]");
       const pts = puntos(r.slice(1)); if (pts.length < 3) throw new Error("forma suave necesita 3 puntos o más");
-      const e = estiloCerrado(opciones(r.slice(1 + pts.length))); return res(crear("forma suave", [{ pts: catmull(pts, true), cerrado: true }], e.relleno, e.borde), "forma suave");
+      const e = estiloCerrado(opciones(r.slice(1 + pts.length))); return res(crear("forma suave", [{ pts: catmull(pts, true), cerrado: true }], e.relleno, e.borde, { ctrl: pts.map(p => p.slice()), gen: "forma suave" }), "forma suave");
     }
     case "texto": {
       const p = P(r[0]), t = (r[1] || "").replace(/^"|"$/g, ""), tam = NUM(r[2], "texto"), c = color(r.slice(3).join(" ")) || doc.pincel.c;
@@ -1196,11 +1348,24 @@ function ejecutarOrden(linea, reproduciendo) {
       throw new Error("tangente circulo … | tangente forma …");
     }
     // ----- efectos y cambios sobre una forma -----
+    case "borra": case "mueve": if (cmd === "borra" && sinT(r[0] || "") === "trazo") { const pts = puntos(r.slice(1)); if (!pts.length) throw new Error("borra trazo x,y x,y … [grosor 20] [suave|duro] [fuerza 100%]"); return res(crearPincelada(pts, r.slice(1 + pts.length), true), "borrado"); }
+      if (cmd === "mueve" && /^(punto|iman)$/.test(sinT(r[0] || ""))) {
+        const f = forma(r[2]), k = Number(r[3]) - 1, q = P(r[4]); if (sinT(r[1] || "") !== "forma" || !f || !q) throw new Error("mueve punto forma N K x,y  (los puntos: «puntos forma N»)");
+        if (!f.ctrl) throw new Error("la forma " + f.id + " (" + f.tipo + ") no tiene puntos editables"); if (!(k >= 0 && k < f.ctrl.length)) throw new Error("la forma " + f.id + " tiene " + f.ctrl.length + " puntos (1 a " + f.ctrl.length + ")");
+        f.ctrl[k] = q; regenerar(f); f.v = (f.v || 0) + 1; return "✓ punto " + (k + 1) + " de la forma " + f.id + " movido a " + q.join(",");
+      }
+    // falls through
     case "degradado": case "transparencia": case "difumina": case "sombra": case "brillo": case "contorno": case "textura": case "color": case "mueve": case "gira": case "escala": case "espejo": case "borra": case "copia": case "duplica": {
       if (sinT(r[0]) !== "forma") throw new Error(cmd + " forma N …");
       const f = forma(r[1]); if (!f) throw new Error("no hay forma " + r[1] + " (mira la lista con «lista»)");
       const a = r.slice(2), b = caja(f), cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
-      if (cmd === "degradado") { const modo = sinT(a[a.length - 1]); const modos = ["vertical", "horizontal", "radial"]; const m = modos.includes(modo) ? modo : "vertical"; const cs = (modos.includes(modo) ? a.slice(0, -1) : a); let c1 = null, c2 = null; for (let k = 1; k < cs.length && !(c1 && c2); k++) { c1 = color(cs.slice(0, k).join(" ")); c2 = color(cs.slice(k).join(" ")); } if (!c1 || !c2) throw new Error("degradado forma N COLOR1 COLOR2 vertical|horizontal|radial"); f.ef.degradado = { c1, c2, modo: m }; if (!f.relleno) f.relleno = c1; }
+      if (cmd === "degradado") {
+        let t = a.slice(), centro = null; const ic = t.findIndex(x => sinT(x) === "centro"); if (ic >= 0) { centro = P(t[ic + 1]); t.splice(ic, 2); }
+        const modos = ["vertical", "horizontal", "radial", "diagonal"], m = modos.includes(sinT(t[t.length - 1] || "")) ? sinT(t.pop()) : "vertical", cs = [];
+        for (let k = 0; k < t.length;) { let ok = 0; for (let n = Math.min(4, t.length - k); n >= 1; n--) { const c = color(t.slice(k, k + n).join(" ")); if (c) { cs.push(c); ok = n; break; } } if (!ok) throw new Error("color «" + t[k] + "» desconocido en el degradado"); k += ok; }
+        if (cs.length < 2) throw new Error("degradado forma N COLOR1 COLOR2 [COLOR3 …] vertical|horizontal|diagonal|radial [centro x,y]");
+        f.ef.degradado = { cs, modo: m, centro }; if (!f.relleno) f.relleno = cs[0];
+      }
       else if (cmd === "transparencia") f.ef.opacidad = Math.max(0, Math.min(100, parseFloat(a[0]))) / 100;
       else if (cmd === "difumina") f.ef.difumina = Math.max(1, Math.min(40, NUM(a[0], "difumina")));
       else if (cmd === "sombra") { const d = P(a[0]); const resto = a.slice(1).join(" "); const mo = resto.match(/^(.*?)(?:\s+(\d{1,3})%)?(?:\s+suave\s+(\d+))?$/); const c = color((mo[1] || "negro").trim() || "negro"); if (!d || !c) throw new Error("sombra forma N dx,dy COLOR [50%] [suave 8]"); f.ef.sombra = { dx: d[0], dy: d[1], c, op: mo[2] ? +mo[2] / 100 : 0.5, suave: mo[3] ? +mo[3] : Math.max(2, Math.round(Math.hypot(d[0], d[1]) / 2)) }; }
@@ -1215,6 +1380,7 @@ function ejecutarOrden(linea, reproduciendo) {
       else if (cmd === "borra") { doc.formas = doc.formas.filter(x => x !== f); return "✓ forma " + f.id + " borrada"; }
       else if (cmd === "copia") { doc.portapapeles = [JSON.parse(JSON.stringify(f))]; return "✓ forma " + f.id + " copiada (pégala con «pega x,y»)"; }
       else if (cmd === "duplica") { const d = P(a[0]) || [20, 20]; const g = JSON.parse(JSON.stringify(f)); g.id = doc.sigId++; transformar(g, ([x, y]) => [x + d[0], y + d[1]]); doc.formas.push(g); return "✓ forma " + f.id + " duplicada · forma " + g.id; }
+      f.v = (f.v || 0) + 1;   // cambió: su capa se repinta
       return "✓ " + cmd + " aplicado a la forma " + f.id;
     }
     case "pega": case "sello": {
@@ -1235,6 +1401,12 @@ function ejecutarOrden(linea, reproduciendo) {
     }
     case "capa": {
       if (/^(oculta|muestra)$/.test(sinT(r[1] || ""))) r.reverse();   // «capa 2 oculta» = «capa oculta 2»
+      if (/^(opacidad|modo)$/.test(sinT(r[1] || ""))) {
+        const n = NUM(r[0], "capa") - 1, k = doc.capas[n]; if (!k) throw new Error("no hay capa " + r[0]); const q = sinT(r[1]), v = sinT(r[2] || "");
+        if (q === "opacidad") { k.op = Math.max(0, Math.min(100, parseFloat(v))) / 100; if (!isFinite(k.op)) throw new Error("capa N opacidad 50%"); return "✓ capa " + (n + 1) + " al " + Math.round(k.op * 100) + "%"; }
+        if (!["normal", "multiplicar", "pantalla", "superponer"].includes(v)) throw new Error("capa N modo normal|multiplicar|pantalla|superponer");
+        if (n === 0) throw new Error("la capa 1 (fondo) siempre es normal; crea otra con «capa nueva»"); k.modo = v; return "✓ capa " + (n + 1) + " en modo " + v;
+      }
       const s = sinT(r[0] || "");
       const max = doc.w * doc.h > 1024 * 1024 ? 4 : 8;
       if (s === "nueva") { if (doc.capas.length >= max) throw new Error("máximo " + max + " capas en este tamaño de lienzo"); doc.capas.push({ nombre: r.slice(1).join(" ") || "capa " + (doc.capas.length + 1) }); doc.capa = doc.capas.length - 1; return "✓ capa " + (doc.capa + 1) + " creada y elegida"; }
@@ -1279,6 +1451,11 @@ function animar(A, B, nuevas, cmd, d) {   // A: como estaba · B: como queda. El
     if (nuevas.length) {
       const fr = nuevas.find(f => f.tipo === "relleno");
       if (fr) { tipo = "mancha"; punto = fr.punto; }
+      else if (nuevas.some(f => f.tipo === "pincelada" || f.tipo === "mezcla")) {   // pincel: se descubre la pincelada REAL a lo largo de su camino
+        tipo = "pincel";
+        for (const f of nuevas) { const g = f.tipo === "mezcla" ? f.mz.r * 2 + 4 : Math.max(...(f.pc ? f.pc.g : [4])) + 6;
+          for (const s of f.caminos) { const p = s.pts; let L = 0; for (let i = 1; i < p.length; i++) L += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]); trazos.push({ p, L: Math.max(L, 0.01), g }); largo += Math.max(L, 0.01); } }
+      }
       else if (cmd === "texto" || MOTOR.doc.pixel) { tipo = "barre"; caja = nuevas.map(MOTOR.caja).reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1) })); }
       else {
         for (const f of nuevas) { const col = f.borde && f.borde.c ? f.borde.c : f.relleno || [0, 0, 0, 1], g = Math.max(2, f.borde ? f.borde.g : 3);
@@ -1294,6 +1471,17 @@ function animar(A, B, nuevas, cmd, d) {   // A: como estaba · B: como queda. El
       if (A) ctx.drawImage(A, 0, 0); else { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height); }
       if (tipo === "funde") { ctx.globalAlpha = t; ctx.drawImage(B, 0, 0); }
       else if (tipo === "barre") { ctx.save(); ctx.beginPath(); ctx.rect(0, 0, caja.x0 + (caja.x1 - caja.x0) * t, cv.height); ctx.clip(); ctx.drawImage(B, 0, 0); ctx.restore(); }
+      else if (tipo === "pincel") {
+        const C = DIB.velo || (DIB.velo = document.createElement("canvas")); if (C.width !== cv.width || C.height !== cv.height) { C.width = cv.width; C.height = cv.height; }
+        const c2 = C.getContext("2d"); c2.globalCompositeOperation = "source-over"; c2.clearRect(0, 0, C.width, C.height); c2.lineCap = "round"; c2.lineJoin = "round"; c2.strokeStyle = "#000";
+        let resta = largo * t, punta = null;
+        for (const s of trazos) { if (resta <= 0) break; c2.lineWidth = s.g; c2.beginPath(); c2.moveTo(s.p[0][0], s.p[0][1]); if (s.p.length === 1) c2.lineTo(s.p[0][0] + 0.01, s.p[0][1]);
+          for (let i = 1; i < s.p.length; i++) { const q = s.p[i - 1], r = s.p[i], l = Math.hypot(r[0] - q[0], r[1] - q[1]); if (l >= resta) { const k = l ? resta / l : 0; punta = [q[0] + (r[0] - q[0]) * k, q[1] + (r[1] - q[1]) * k]; c2.lineTo(punta[0], punta[1]); resta = 0; break; } c2.lineTo(r[0], r[1]); resta -= l; punta = r; }
+          if (resta > 0) resta -= 0; c2.stroke(); if (s.p.length === 1) resta -= s.L; }
+        c2.globalCompositeOperation = "source-in"; c2.drawImage(B, 0, 0); c2.globalCompositeOperation = "source-over";
+        ctx.drawImage(C, 0, 0);
+        if (punta && t < 1) { ctx.fillStyle = "rgba(30,30,30,.55)"; ctx.beginPath(); ctx.arc(punta[0], punta[1], Math.max(3, cv.width / 140), 0, 2 * Math.PI); ctx.fill(); }
+      }
       else if (tipo === "mancha") { ctx.save(); ctx.beginPath(); ctx.arc(punto[0], punto[1], Math.hypot(cv.width, cv.height) * t, 0, 2 * Math.PI); ctx.clip(); ctx.drawImage(B, 0, 0); ctx.restore(); }
       else {
         if (t > 0.7) { ctx.globalAlpha = (t - 0.7) / 0.3; ctx.drawImage(B, 0, 0); }
