@@ -1315,6 +1315,21 @@ function ejecutarOrden(linea, reproduciendo) {
       if (cmd === "mezcla") { const R = NUM(a[0], "mezcla"), mf = a.join(" ").match(/fuerza\s+(\d{1,3})%?/i); return res(crear("mezcla", [{ pts, cerrado: false }], null, null, { mz: { r: Math.max(2, Math.min(200, R)), f: mf ? Math.min(100, +mf[1]) / 100 : 0.7 } }), "mezcla"); }
       return res(crearPincelada(pts, a, false), "pincelada");
     }
+    case "une": {   // une tramos cortos en UN contorno cerrado (se gira cada tramo para que encaje con el anterior)
+      const ids = String(sinT(r[0] || "") === "formas" ? r[1] : r[0] || "").split(",").map(Number).filter(Boolean), fs2 = ids.map(forma);
+      if (ids.length < 2 || fs2.some(f => !f)) throw new Error("une formas 3,4,5,6 [relleno COLOR] [borde G COLOR | sin borde] [recto]  (números de forma separados por comas)");
+      const sin = fs2.find(f => !f.ctrl); if (sin) throw new Error("la forma " + sin.id + " (" + sin.tipo + ") no tiene puntos: une trazo, curva, bezier, pinta, poligono o forma suave");
+      const tramos = fs2.map(f => f.ctrl.map(q => q.slice())), d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+      { const a = tramos[0], b = tramos[1], ini = Math.min(d(a[0], b[0]), d(a[0], b[b.length - 1])), fin = Math.min(d(a[a.length - 1], b[0]), d(a[a.length - 1], b[b.length - 1])); if (ini < fin) a.reverse(); }
+      const pts = tramos[0].slice();
+      for (let i = 1; i < tramos.length; i++) { const t = tramos[i], fin = pts[pts.length - 1]; if (d(fin, t[t.length - 1]) < d(fin, t[0])) t.reverse(); for (const q of t) if (d(pts[pts.length - 1], q) > 0.75) pts.push(q); }
+      if (pts.length > 2 && d(pts[0], pts[pts.length - 1]) <= 0.75) pts.pop();
+      if (pts.length < 3) throw new Error("los tramos juntos tienen menos de 3 puntos");
+      const recto = r.some(x => sinT(x) === "recto"), e = estiloCerrado(opciones(r.slice(1).filter(x => sinT(x) !== "recto"))), capa0 = doc.capa, sim = doc.simetria;
+      doc.formas = doc.formas.filter(f => !ids.includes(f.id)); doc.capa = fs2[0].capa; doc.simetria = null;
+      let nuevos; try { nuevos = crear(recto ? "poligono" : "forma suave", [{ pts: recto ? pts.map(q => q.slice()) : catmull(pts, true), cerrado: true }], e.relleno, e.borde, { ctrl: pts, gen: recto ? "poligono" : "forma suave" }); } finally { doc.capa = capa0; doc.simetria = sim; }
+      return "✓ " + ids.length + " tramos unidos en la forma " + nuevos[0] + " (" + pts.length + " puntos, contorno cerrado" + (recto ? ", recto" : ", suave") + ") · edítala con «puntos forma " + nuevos[0] + "»";
+    }
     case "importa": {   // retoque: una imagen PNG de la carpeta «imagenes» como base (queda marcado como RETOQUE)
       const n = String(r[0] || "").replace(/^"|"$/g, ""); if (!/^[\w.-]+\.png$/i.test(n)) throw new Error("importa NOMBRE.png [x,y] [ancho W | escala F]  (el archivo va en la carpeta «imagenes»)");
       const im = imagenDe(n); if (!im) throw new Error("no encuentro «" + n + "» en la carpeta imagenes (solo PNG)");
@@ -1349,7 +1364,7 @@ function ejecutarOrden(linea, reproduciendo) {
       const id = ++doc.selN; doc.sels[id] = s0; doc.sel = id; return "✓ selección " + id + " (" + s0.tipo + "): lo que pintes ahora solo cae dentro · «seleccion no» para quitarla";
     }
     case "paleta": {
-      if (!r.length) return "Paleta: " + (Object.keys(doc.paleta).join(", ") || "(vacía)") + " · nombres fijos: " + Object.keys(NOMBRES).join(", ");
+      if (!r.length) return "Paleta: " + (Object.entries(doc.paleta).map(([k, c]) => k + " " + "#" + c.slice(0, 3).map(v => Math.round(v).toString(16).padStart(2, "0")).join("") + (c[3] < 1 ? " " + Math.round(c[3] * 100) + "%" : "")).join(" · ") || "(vacía)") + " · nombres fijos: " + Object.keys(NOMBRES).join(", ");
       const c = color(r.slice(1).join(" ")); if (!c) throw new Error("color desconocido"); doc.paleta[sinT(r[0])] = c; return "✓ color «" + r[0] + "» guardado en la paleta";
     }
     case "linea": { const pts = puntos(r); if (pts.length < 2) throw new Error("linea x,y x,y [grosor] [color]"); const g = r[2] && isFinite(+r[2]) ? +r[2] : doc.pincel.g, c = color(r.slice(r[2] && isFinite(+r[2]) ? 3 : 2).join(" ")) || doc.pincel.c; return res(crear("linea", [{ pts: pts.slice(0, 2), cerrado: false }], null, { g, c }), "línea"); }
